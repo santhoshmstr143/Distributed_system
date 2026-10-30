@@ -68,6 +68,13 @@ uvicorn "docstore.shard.app:create_default_app" --factory \
 python -m docstore.router
 ```
 
+## Running the coordinator (M4 milestone)
+
+```bash
+# Start the central coordinator service
+python -m docstore.coordinator
+```
+
 ## Development workflow
 
 ```bash
@@ -89,8 +96,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming and commit conventions.
 | 3  | ✅ Done | Basic shard node API |
 | 4  | ✅ Done | Static shard map & router |
 | 5  | ✅ Done | Query engine & scatter-gather |
-| 6  | ⬜ | Coordinator, epochs, leases |
-| 7  | ⬜ | Replication (primary → follower) |
+| 6  | ✅ Done | Coordinator, epochs, leases |
+| 7  | ✅ Done | Replication (primary → follower) |
 | 8  | ⬜ | Failover & fencing |
 | 9  | ⬜ | Live range migration |
 | 10–16 | ⬜ | Client, Docker, hardening, benchmarks, demo, report, release |

@@ -128,8 +128,12 @@ async def _query_single_shard(
     timeout_s: float,
 ) -> list[dict[str, Any]]:
     """Send query to a single shard primary and validate response range."""
-    primary = entry.primary.removeprefix("http://").removeprefix("https://")
-    url = f"http://{primary}/query"
+    target = entry.primary
+    if payload.get("read_mode") == "follower" and entry.follower:
+        target = entry.follower
+
+    clean_target = target.removeprefix("http://").removeprefix("https://")
+    url = f"http://{clean_target}/query"
 
     body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     sig = compute_signature(cluster_secret, body_bytes)
@@ -138,7 +142,16 @@ async def _query_single_shard(
         CLUSTER_SIG_HEADER: sig,
     }
 
-    resp = await client.post(url, content=body_bytes, headers=headers, timeout=timeout_s)
+    try:
+        resp = await client.post(url, content=body_bytes, headers=headers, timeout=timeout_s)
+    except Exception as exc:
+        if target != entry.primary:
+            primary = entry.primary.removeprefix("http://").removeprefix("https://")
+            resp = await client.post(
+                f"http://{primary}/query", content=body_bytes, headers=headers, timeout=timeout_s
+            )
+        else:
+            raise exc
     if resp.status_code != 200:
         try:
             data = resp.json()

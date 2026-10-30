@@ -188,6 +188,25 @@ class WAL:
         """Return the next seq number to use."""
         return self._next_seq
 
+    @property
+    def last_seq(self) -> int:
+        """Return the highest assigned sequence number."""
+        return self._next_seq - 1
+
+    def earliest_seq(self) -> int | None:
+        """Return the sequence number of the first record in the WAL, if any."""
+        if not self._path.exists():
+            return None
+        try:
+            with open(self._path, "rb") as f:
+                first_line = f.readline().strip()
+                if not first_line:
+                    return None
+                rec = json.loads(first_line)
+                return int(rec["seq"])
+        except Exception:
+            return None
+
     # ── Truncation ────────────────────────────────────────────────────────────
 
     def truncate_after(self, seq: int) -> None:

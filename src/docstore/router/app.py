@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -173,19 +173,42 @@ def build_router_app(
 
     # ── Forwarding helper with bounded retry ──────────────────────────────────
 
+    async def _forward_to_host(
+        req: Request,
+        target_host: str,
+        method: str,
+        path: str,
+        body_dict: dict[str, Any] | None,
+    ) -> httpx.Response:
+        client: httpx.AsyncClient = req.app.state.http_client
+        cluster_secret: str = req.app.state.settings.CLUSTER_SECRET
+        clean_target = target_host.removeprefix("http://").removeprefix("https://")
+        url = f"http://{clean_target}{path}"
+
+        if body_dict is not None:
+            body_bytes = json.dumps(body_dict, separators=(",", ":")).encode("utf-8")
+            sig = compute_signature(cluster_secret, body_bytes)
+            headers = {"Content-Type": "application/json", CLUSTER_SIG_HEADER: sig}
+            content = body_bytes
+        else:
+            sig = compute_signature(cluster_secret, b"")
+            headers = {CLUSTER_SIG_HEADER: sig}
+            content = b""
+
+        return await client.request(method=method, url=url, content=content, headers=headers)
+
     async def _forward_request(
         req: Request,
         doc_id: int,
         method: str,
         path: str,
         body_dict: dict[str, Any] | None,
+        target_role: str = "primary",
     ) -> JSONResponse:
-        """Route request to owning primary, refreshing map once if node reports stale map."""
-        client: httpx.AsyncClient = req.app.state.http_client
+        """Route request to owning shard, refreshing map once if node reports stale map."""
         mgr: ShardMapManager = req.app.state.map_mgr
-        cluster_secret: str = req.app.state.settings.CLUSTER_SECRET
 
-        # Attempt up to 2 times (initial + 1 retry on stale map)
+        # Attempt up to 2 times (initial + 1 retry on stale map or replication unavailable)
         for attempt in range(2):
             try:
                 entry: ShardMapEntry = mgr.get_shard_for_doc_id(doc_id)
@@ -198,32 +221,24 @@ def build_router_app(
                         logger.debug("Map reload failed: %s", reload_exc)
                 raise exc.to_http_exception() from exc
 
-            primary = entry.primary.removeprefix("http://").removeprefix("https://")
-            url = f"http://{primary}{path}"
+            # Read from follower if requested and available
+            if target_role == "follower" and method in ("GET", "HEAD") and entry.follower:
+                clean_follower = entry.follower.removeprefix("http://").removeprefix("https://")
+                try:
+                    resp = await _forward_to_host(req, clean_follower, method, path, body_dict)
+                    if resp.status_code < 500:
+                        try:
+                            resp_json = resp.json()
+                        except Exception:
+                            resp_json = {"detail": resp.text}
+                        return JSONResponse(status_code=resp.status_code, content=resp_json)
+                except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                    logger.debug("Follower read failed, falling back to primary: %s", exc)
 
-            # Prepare body and signature
-            if body_dict is not None:
-                body_bytes = json.dumps(body_dict, separators=(",", ":")).encode("utf-8")
-                sig = compute_signature(cluster_secret, body_bytes)
-                headers = {
-                    "Content-Type": "application/json",
-                    CLUSTER_SIG_HEADER: sig,
-                }
-                content = body_bytes
-            else:
-                sig = compute_signature(cluster_secret, b"")
-                headers = {
-                    CLUSTER_SIG_HEADER: sig,
-                }
-                content = b""
+            primary = entry.primary.removeprefix("http://").removeprefix("https://")
 
             try:
-                resp = await client.request(
-                    method=method,
-                    url=url,
-                    content=content,
-                    headers=headers,
-                )
+                resp = await _forward_to_host(req, primary, method, path, body_dict)
             except (httpx.ConnectError, httpx.TimeoutException) as exc:
                 if attempt == 0:
                     try:
@@ -241,8 +256,9 @@ def build_router_app(
                     },
                 ) from exc
 
-            # Check if shard reports stale routing (OutOfRange or StaleEpoch or NotPrimary)
-            if resp.status_code in (400, 409) and attempt == 0:
+            # Check if shard reports stale routing (OutOfRange/StaleEpoch/NotPrimary)
+            # or replication unavailable
+            if resp.status_code in (400, 409, 503) and attempt == 0:
                 try:
                     data = resp.json()
                     err_code = data.get("detail", {}).get("error_code") or data.get("error_code")
@@ -254,6 +270,13 @@ def build_router_app(
                             doc_id,
                         )
                         mgr.reload()
+                        continue
+                    if err_code == "REPLICATION_UNAVAILABLE":
+                        logger.warning(
+                            "Shard %s returned REPLICATION_UNAVAILABLE; retrying with backoff",
+                            entry.shard_id,
+                        )
+                        await asyncio.sleep(0.05)
                         continue
                 except Exception as parse_exc:
                     logger.debug("Failed parsing error body from shard: %s", parse_exc)
@@ -364,6 +387,7 @@ def build_router_app(
     async def get_doc(
         doc_id: int,
         request: Request,
+        read_mode: str = Query(default="primary"),
     ) -> JSONResponse:
         _verify_client_auth(request.headers.get(CLIENT_KEY_HEADER))
         if isinstance(doc_id, bool) or doc_id < DOC_ID_MIN or doc_id > DOC_ID_MAX:
@@ -375,6 +399,7 @@ def build_router_app(
             method="GET",
             path=f"/doc/{doc_id}",
             body_dict=None,
+            target_role=read_mode,
         )
 
     @app.post("/query")

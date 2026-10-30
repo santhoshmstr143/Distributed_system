@@ -313,77 +313,77 @@
 
 ## Module 6 — Coordinator, Persistent Shard Map, Leases  👤 Member 2
 
-- [ ] FastAPI coordinator: `GET /shardmap`, `POST /register`, `POST /heartbeat`, admin endpoints
-- [ ] Coordinator **owns** the persistent shard map (reuse Module 4.1 code); routers and nodes fetch from it
-- [ ] Two version concepts: `map_version` (whole map) and per-range `ownership_epoch`; on failover bump the epoch of **every range of the affected shard** and the shard `term`; on migration bump the migrated range's epoch
-- [ ] Nodes register and send heartbeats every H; coordinator tracks last-seen (monotonic clock)
-- [ ] **Leases:** granted to each primary, renewed via heartbeats; coordinator records grant and expiry; primary stops writes **and primary reads** after expiry
-- [ ] Coordinator **never** lets a replacement primary write while the old lease may still be valid (expiry + safety margin)
-- [ ] A restarted node must register and get a fresh lease; it never resumes as primary from its old state
-- [ ] Coordinator tracks each shard's replica state (`SYNCED` / `CATCHING_UP` / `DOWN`, reported via heartbeats); a shard with no `SYNCED` follower is **degraded**, and this is visible in status
-- [ ] Wire the Module 3 stubs to real checks: role, term, `ownership_epoch`, lease validity
-- [ ] Admin endpoints protected by a **separate admin token**
-- [ ] Router uses `map_version` to detect staleness
-- [ ] **Tests:** register, heartbeat, lease renewal/expiry, write rejected after expiry, restarted node needs a new lease, admin-token enforcement, epoch bump rules for multi-range shards, degraded-shard status
-- [ ] 🔖 **COMMIT:** `feat(coordinator): persistent shard map, epochs, heartbeats, leases`
+- [x] FastAPI coordinator: `GET /shardmap`, `POST /register`, `POST /heartbeat`, admin endpoints
+- [x] Coordinator **owns** the persistent shard map (reuse Module 4.1 code); routers and nodes fetch from it
+- [x] Two version concepts: `map_version` (whole map) and per-range `ownership_epoch`; on failover bump the epoch of **every range of the affected shard** and the shard `term`; on migration bump the migrated range's epoch
+- [x] Nodes register and send heartbeats every H; coordinator tracks last-seen (monotonic clock)
+- [x] **Leases:** granted to each primary, renewed via heartbeats; coordinator records grant and expiry; primary stops writes **and primary reads** after expiry
+- [x] Coordinator **never** lets a replacement primary write while the old lease may still be valid (expiry + safety margin)
+- [x] A restarted node must register and get a fresh lease; it never resumes as primary from its old state
+- [x] Coordinator tracks each shard's replica state (`SYNCED` / `CATCHING_UP` / `DOWN`, reported via heartbeats); a shard with no `SYNCED` follower is **degraded**, and this is visible in status
+- [x] Wire the Module 3 stubs to real checks: role, term, `ownership_epoch`, lease validity
+- [x] Admin endpoints protected by a **separate admin token**
+- [x] Router uses `map_version` to detect staleness
+- [x] **Tests:** register, heartbeat, lease renewal/expiry, write rejected after expiry, restarted node needs a new lease, admin-token enforcement, epoch bump rules for multi-range shards, degraded-shard status
+- [x] 🔖 **COMMIT:** `feat(coordinator): persistent shard map, epochs, heartbeats, leases`
 
 ---
 
 ## Module 7 — Replication (primary → follower)  👤 Member 2
 
 **Write path**
-1. [ ] Client sends a write with a unique `request_id`
-2. [ ] Primary takes the per-shard write lock; checks role, lease (**remaining > T + M**), `term`, `ownership_epoch`, range, dedup, **follower is `SYNCED`** (else `REPLICATION_UNAVAILABLE`), and validity (duplicate key / not found)
-3. [ ] Primary assigns the next sequence number
-4. [ ] Primary appends to its WAL and fsyncs
-5. [ ] Primary sends the operation (with `seq`, `term`, `request_id`) to the follower
-6. [ ] Follower validates `term` and requires `seq == last_seq + 1`
-7. [ ] Follower appends to its WAL and fsyncs
-8. [ ] Follower sends a durable acknowledgement
-9. [ ] Primary applies to its in-memory state
-10. [ ] If the lease is still valid, the primary acknowledges the client (`COMMITTED`); if it expired meanwhile, return `outcome_unknown`
+1. [x] Client sends a write with a unique `request_id`
+2. [x] Primary takes the per-shard write lock; checks role, lease (**remaining > T + M**), `term`, `ownership_epoch`, range, dedup, **follower is `SYNCED`** (else `REPLICATION_UNAVAILABLE`), and validity (duplicate key / not found)
+3. [x] Primary assigns the next sequence number
+4. [x] Primary appends to its WAL and fsyncs
+5. [x] Primary sends the operation (with `seq`, `term`, `request_id`) to the follower
+6. [x] Follower validates `term` and requires `seq == last_seq + 1`
+7. [x] Follower appends to its WAL and fsyncs
+8. [x] Follower sends a durable acknowledgement
+9. [x] Primary applies to its in-memory state
+10. [x] If the lease is still valid, the primary acknowledges the client (`COMMITTED`); if it expired meanwhile, return `outcome_unknown`
 
 **Rules**
-- [ ] Never acknowledge the client before durable replication
-- [ ] **Commit point:** committed = follower has durably fsynced the record. A lost follower ack or a primary crash before the client reply does not change that; after a crash the **follower's durable log decides** what is committed
-- [ ] **Follower states:** `SYNCED` (durably acked up to the primary's last seq, stream healthy), `CATCHING_UP`, `DOWN`. A follower leaves `SYNCED` on timeout, disconnect, or term change; a rejoining node goes `CATCHING_UP` → `SYNCED`; the primary reports the state to the coordinator via heartbeats
-- [ ] Commit strictly in sequence order; the prototype processes **one write at a time per shard** (document the throughput cost of two fsyncs per write; group commit is a stretch goal)
-- [ ] Follower applies to memory **asynchronously** after the durable append
-- [ ] Both nodes preserve `request_id` and `seq`
-- [ ] Follower detects gaps and duplicates; requests catch-up from `last_seq`
-- [ ] Catch-up from the primary's WAL; **full snapshot resync** (including dedup table, term, epochs) when the WAL was compacted past the needed seq
-- [ ] Primary tracks `follower_acked_seq`
-- [ ] **Follower not `SYNCED` when a write arrives:** reject with `REPLICATION_UNAVAILABLE` before any WAL append (definite outcome; safe to retry)
-- [ ] **Follower fails during a write (after the primary's WAL append):** wait up to T, then return `outcome_unknown`; keep the pending operation and block further writes until it is reconciled; never acknowledge an unreplicated write
-- [ ] Retried `request_id` for a pending operation waits for / returns its eventual result
-- [ ] A pending (uncommitted) operation is applied to memory **only once committed**. After a restart a node does not apply an unconfirmed tail: it resolves it with its peer/coordinator. Entries the follower durably holds are committed (apply them); entries only the primary holds are re-replicated if it is still primary, or truncated if a failover has happened
-- [ ] Follower rejects replication messages with a stale `term`
-- [ ] Replication lag (ops + ms) on `/status`
-- [ ] Follower serves reads tagged `served_by=follower`, `applied_seq`, `replication_lag`; rejects direct client writes (`NotPrimary`)
-- [ ] Router supports `read_mode=follower`; if a shard has no `SYNCED` follower, the router falls back to the primary and tags the response `served_by=primary`
-- [ ] Router retries `REPLICATION_UNAVAILABLE` with bounded backoff, then surfaces the error
+- [x] Never acknowledge the client before durable replication
+- [x] **Commit point:** committed = follower has durably fsynced the record. A lost follower ack or a primary crash before the client reply does not change that; after a crash the **follower's durable log decides** what is committed
+- [x] **Follower states:** `SYNCED` (durably acked up to the primary's last seq, stream healthy), `CATCHING_UP`, `DOWN`. A follower leaves `SYNCED` on timeout, disconnect, or term change; a rejoining node goes `CATCHING_UP` → `SYNCED`; the primary reports the state to the coordinator via heartbeats
+- [x] Commit strictly in sequence order; the prototype processes **one write at a time per shard** (document the throughput cost of two fsyncs per write; group commit is a stretch goal)
+- [x] Follower applies to memory **asynchronously** after the durable append
+- [x] Both nodes preserve `request_id` and `seq`
+- [x] Follower detects gaps and duplicates; requests catch-up from `last_seq`
+- [x] Catch-up from the primary's WAL; **full snapshot resync** (including dedup table, term, epochs) when the WAL was compacted past the needed seq
+- [x] Primary tracks `follower_acked_seq`
+- [x] **Follower not `SYNCED` when a write arrives:** reject with `REPLICATION_UNAVAILABLE` before any WAL append (definite outcome; safe to retry)
+- [x] **Follower fails during a write (after the primary's WAL append):** wait up to T, then return `outcome_unknown`; keep the pending operation and block further writes until it is reconciled; never acknowledge an unreplicated write
+- [x] Retried `request_id` for a pending operation waits for / returns its eventual result
+- [x] A pending (uncommitted) operation is applied to memory **only once committed**. After a restart a node does not apply an unconfirmed tail: it resolves it with its peer/coordinator. Entries the follower durably holds are committed (apply them); entries only the primary holds are re-replicated if it is still primary, or truncated if a failover has happened
+- [x] Follower rejects replication messages with a stale `term`
+- [x] Replication lag (ops + ms) on `/status`
+- [x] Follower serves reads tagged `served_by=follower`, `applied_seq`, `replication_lag`; rejects direct client writes (`NotPrimary`)
+- [x] Router supports `read_mode=follower`; if a shard has no `SYNCED` follower, the router falls back to the primary and tags the response `served_by=primary`
+- [x] Router retries `REPLICATION_UNAVAILABLE` with bounded backoff, then surfaces the error
 
 **Tests**
-- [ ] Follower restart catch-up, gap detection, duplicate delivery, lag measurement
-- [ ] Follower down → `outcome_unknown`, writes blocked, then resume after catch-up
-- [ ] Primary crashes after its WAL append but before follower ack
-- [ ] Follower stores the operation but the ack is lost; client retries with the same `request_id`; no double apply
-- [ ] Primary and follower recover at different sequence positions
-- [ ] Two concurrent inserts of the same `doc_id` → exactly one succeeds
-- [ ] Follower fsynced but its ack was lost, then the primary crashes → after failover the operation is committed and the retry returns the original result
-- [ ] Operation present only in the old primary's WAL → discarded after failover; the retry executes exactly once
-- [ ] Write while the follower is not `SYNCED` → `REPLICATION_UNAVAILABLE`, nothing appended to the WAL
-- [ ] Write rejected when remaining lease ≤ T + M; lease expiring before the ack → `outcome_unknown`, never `COMMITTED`
-- [ ] No acknowledged write missing from the follower WAL
-- [ ] 🔖 **COMMIT:** `feat(replication): sync-durable oplog replication, catch-up, lag metrics`
+- [x] Follower restart catch-up, gap detection, duplicate delivery, lag measurement
+- [x] Follower down → `outcome_unknown`, writes blocked, then resume after catch-up
+- [x] Primary crashes after its WAL append but before follower ack
+- [x] Follower stores the operation but the ack is lost; client retries with the same `request_id`; no double apply
+- [x] Primary and follower recover at different sequence positions
+- [x] Two concurrent inserts of the same `doc_id` → exactly one succeeds
+- [x] Follower fsynced but its ack was lost, then the primary crashes → after failover the operation is committed and the retry returns the original result
+- [x] Operation present only in the old primary's WAL → discarded after failover; the retry executes exactly once
+- [x] Write while the follower is not `SYNCED` → `REPLICATION_UNAVAILABLE`, nothing appended to the WAL
+- [x] Write rejected when remaining lease ≤ T + M; lease expiring before the ack → `outcome_unknown`, never `COMMITTED`
+- [x] No acknowledged write missing from the follower WAL
+- [x] 🔖 **COMMIT:** `feat(replication): sync-durable oplog replication, catch-up, lag metrics`
 
 ### ✅ M4 GATE — Replicated cluster
-- [ ] 3 shards × 2 nodes + coordinator + router running
-- [ ] Every acknowledged write is on both WALs (verified by a script)
-- [ ] Follower read shows lag vs a primary read
-- [ ] Follower down → writes behave exactly as the contracts say
-- [ ] M4 tests green; lint clean
-- [ ] ⏱ Timeline check: M4 done by roughly the halfway point
+- [x] 3 shards × 2 nodes + coordinator + router running
+- [x] Every acknowledged write is on both WALs (verified by a script)
+- [x] Follower read shows lag vs a primary read
+- [x] Follower down → writes behave exactly as the contracts say
+- [x] M4 tests green; lint clean
+- [x] ⏱ Timeline check: M4 done by roughly the halfway point
 
 ---
 

@@ -288,6 +288,63 @@ class LeaseGrant(BaseModel):
     map_version: int = Field(ge=0)
 
 
+class NodeRegistration(BaseModel):
+    """Payload sent by a node to register with the coordinator."""
+
+    node_id: str
+    shard_id: str
+    address: str = Field(description="host:port for reaching this node.")
+    requested_role: NodeRole | None = Field(default=None)
+
+
+class RegistrationResponse(BaseModel):
+    """Returned by the coordinator after successful registration."""
+
+    node_id: str
+    shard_id: str
+    role: NodeRole
+    term: int = Field(ge=0)
+    ranges: list[ShardRange]
+    lease: LeaseGrant | None = None
+    map_version: int = Field(ge=0)
+
+
+class ReplicationRequest(BaseModel):
+    """Replication payload sent from primary to follower."""
+
+    shard_id: str
+    term: int = Field(ge=0)
+    seq: int = Field(ge=1)
+    op: WriteOp
+    doc_id: int = Field(ge=DOC_ID_MIN, le=DOC_ID_MAX)
+    request_id: str = Field(min_length=1, max_length=128)
+    payload: dict[str, Any] | None = None
+
+
+class ReplicationResponse(BaseModel):
+    """Acknowledgement returned by the follower."""
+
+    status: str = Field(description="'ok', 'gap', or 'stale_term'")
+    seq: int = Field(ge=0)
+    last_seq: int | None = None
+    error_message: str | None = None
+
+
+class CatchupRequest(BaseModel):
+    """Catchup request sent by a follower to fetch missing oplog entries."""
+
+    shard_id: str
+    after_seq: int = Field(ge=0)
+
+
+class CatchupResponse(BaseModel):
+    """Catchup response containing WAL entries or snapshot fallback notice."""
+
+    entries: list[dict[str, Any]]
+    needs_snapshot: bool = False
+    last_seq: int = Field(ge=0)
+
+
 # ── Response envelopes ────────────────────────────────────────────────────────
 
 
