@@ -62,6 +62,7 @@ def _make_settings(data_dir: Path | str, **overrides: Any) -> Settings:
         "SAFETY_MARGIN_S": 0.2,
         "REPLICATION_TIMEOUT_S": 0.3,
         "ENABLE_TEST_HOOKS": True,
+        "STANDALONE_MODE": True,
     }
     base.update(overrides)
     return Settings.model_validate(base)

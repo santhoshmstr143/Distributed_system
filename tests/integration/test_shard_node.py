@@ -38,6 +38,7 @@ def _make_settings(data_dir: str) -> Any:
             "ADMIN_TOKEN": ADMIN,
             "CLIENT_API_KEY": APIKEY,
             "DATA_DIR": data_dir,
+            "STANDALONE_MODE": True,
         }
     )
 

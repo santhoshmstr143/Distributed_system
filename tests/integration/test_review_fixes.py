@@ -620,6 +620,7 @@ async def test_pending_write_retry_no_duplicate(tmp_path: Path):
         node_id="shard0-standalone",
         shard_id="shard0",
         role=NodeRole.PRIMARY,
+        allow_standalone=True,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -894,7 +895,13 @@ async def test_wal_restart_uncommitted_entry_discarded_and_sequence_consistent(t
     shard_id = "shard0"
 
     # Start primary and execute committed write (seq=1)
-    app1 = build_app(settings=settings, node_id="p1", shard_id=shard_id, role=NodeRole.PRIMARY)
+    app1 = build_app(
+        settings=settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        allow_standalone=True,
+    )
     async with LifespanManager(app1):
         transport1 = ASGITransport(app=app1)
         async with AsyncClient(transport=transport1, base_url="http://p1") as c1:
@@ -960,7 +967,13 @@ async def test_wal_restart_uncommitted_entry_discarded_and_sequence_consistent(t
             assert p_state.committed_seq == 1
 
     # Simulate restart of primary node
-    app2 = build_app(settings=settings, node_id="p1", shard_id=shard_id, role=NodeRole.PRIMARY)
+    app2 = build_app(
+        settings=settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        allow_standalone=True,
+    )
     async with LifespanManager(app2):
         state2 = app2.state.node
         # Verify uncommitted entry (doc 20) did NOT reappear in engine
@@ -1358,7 +1371,11 @@ async def test_promotion_truncates_uncommitted_tail_and_preserves_committed(tmp_
     shard_id = "shard0"
 
     app = build_app(
-        settings=settings, node_id="node-promote", shard_id=shard_id, role=NodeRole.FOLLOWER
+        settings=settings,
+        node_id="node-promote",
+        shard_id=shard_id,
+        role=NodeRole.FOLLOWER,
+        allow_standalone=True,
     )
     async with LifespanManager(app):
         state = app.state.node
@@ -1700,6 +1717,7 @@ async def test_crash_window_primary_restart_follower_unavailable_blocks_writes(
         shard_id=shard_id,
         role=NodeRole.PRIMARY,
         ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        allow_standalone=True,
     )
     async with LifespanManager(p_app1):
         p1_state = p_app1.state.node
@@ -1919,6 +1937,7 @@ async def test_crash_window_uncommitted_operation_authoritatively_discarded(
         shard_id=shard_id,
         role=NodeRole.PRIMARY,
         ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        allow_standalone=True,
     )
     async with LifespanManager(p_app1):
         p1_state = p_app1.state.node
@@ -2331,3 +2350,61 @@ async def test_regression_unresolved_write_preserves_outcome_unknown_and_blocks_
             # Primary did not append subsequent write to WAL
             assert p_state.wal.last_seq == 1
             assert p_state.engine.get(20) is None
+
+
+@pytest.mark.asyncio
+async def test_regression_primary_without_follower_url_fails_closed(tmp_path: Path):
+    """Regression test: Primary without configured follower fails closed.
+    - Write returns HTTP 503 REPLICATION_UNAVAILABLE.
+    - WAL sequence remains unchanged.
+    - committed_seq remains unchanged.
+    - Engine remains unchanged.
+    - No dedup entry is created.
+    """
+    settings = _make_settings(tmp_path)
+    shard_id = "shard0"
+
+    # Default build_app has follower_url=None and allow_standalone=False
+    app = build_app(
+        settings=settings,
+        node_id="p-no-follower",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url=None,
+    )
+
+    async with LifespanManager(app):
+        state = app.state.node
+        assert state.follower_url is None
+        assert state.allow_standalone is False
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://node") as client:
+            resp = await client.post(
+                "/doc",
+                json={
+                    "request_id": "req-no-follower",
+                    "document": {"doc_id": 10, "val": "fail_closed"},
+                },
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+
+            # 1. Write returns HTTP 503 REPLICATION_UNAVAILABLE
+            assert resp.status_code == 503
+            err_code = resp.json().get("detail", {}).get("error_code") or resp.json().get(
+                "error_code"
+            )
+            assert err_code == "REPLICATION_UNAVAILABLE"
+
+            # 2. WAL sequence remains unchanged (0)
+            assert state.wal.last_seq == 0
+
+            # 3. committed_seq remains unchanged (0)
+            assert state.committed_seq == 0
+
+            # 4. Engine remains unchanged
+            assert state.engine.get(10) is None
+
+            # 5. No dedup entry is created
+            assert state.engine.dedup_check("req-no-follower") is None

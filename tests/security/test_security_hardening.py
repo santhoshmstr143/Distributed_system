@@ -35,6 +35,7 @@ def sec_settings(tmp_path: Path) -> Settings:
         CLIENT_API_KEY="security-test-client-api-key-16ch",
         DATA_DIR=str(tmp_path / "sec_data"),
         ENABLE_TEST_HOOKS=False,
+        STANDALONE_MODE=True,
     )
 
 

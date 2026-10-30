@@ -58,7 +58,7 @@ A distributed, range-partitioned JSON document store built in Python 3.11 with `
    - Bounded retries on routing staleness (`OUT_OF_RANGE`, `STALE_EPOCH`, `NOT_PRIMARY`, `REPLICATION_UNAVAILABLE`).
 
 3. **Shard Nodes (`docstore.shard`):**
-   - **Primary Node:** Accepts write traffic, holds a per-shard write lock, validates range ownership, leases, and follower status, appends to its WAL and fsyncs, synchronously replicates to the follower, and updates memory and dedup table.
+   - **Primary Node:** Accepts write traffic, holds a per-shard write lock, validates range ownership, leases, and follower status. Under normal distributed deployment, replication is strictly **fail-closed**: if no follower is configured or the follower is not in `SYNCED` state, writes are rejected with HTTP 503 `REPLICATION_UNAVAILABLE` before WAL append. When a follower is configured, the primary assigns a sequence number, appends to its WAL, fsyncs, synchronously replicates to the follower (which also fsyncs), commits locally, and updates memory and dedup table. Standalone single-node writes require explicit opt-in via `STANDALONE_MODE=true` or `--standalone`.
    - **Follower Node:** Durably appends replicated oplog entries to its WAL, fsyncs, asynchronously updates memory, detects sequence gaps, supports oplog catch-up (`/internal/catchup`) and snapshot resync (`/internal/snapshot`), and serves reads tagged with `replication_lag`.
    - Inter-node communications are authenticated using HMAC-SHA256 cluster signatures (`X-Cluster-Signature`).
 
@@ -174,7 +174,7 @@ python -m docstore.router
 
 ## Testing & Quality Gates
 
-The test suite contains **230 automated tests** covering unit storage, safe query filtering, shard routing, coordinator leases, replication durability, failover fencing, and live range migration.
+The test suite contains **253 automated tests** covering unit storage, safe query filtering, shard routing, coordinator leases, fail-closed replication durability, failover fencing, and live range migration.
 
 ### Running Fast Tests (Unit + Integration)
 
@@ -527,7 +527,7 @@ curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
 
 - **Coordinator Single-Point-of-Failure:** Coordinator is not fault-tolerant. If it fails, existing primary leases expire and writes halt until restored.
 - **Single-Node Failure Scope:** Failover supports single-node (primary) failure per shard. If both replicas of a shard fail simultaneously, that shard is unavailable.
-- **Degraded Mode Write Rejection:** Writes are rejected (`REPLICATION_UNAVAILABLE`) after failover until the rejoining replica achieves `SYNCED` state. Synchronous replication is never relaxed.
+- **Fail-Closed Synchronous Replication & Degraded Mode:** Writes require durable 2-node synchronous quorum (primary and follower WAL fsync). A primary without a configured follower or with an unavailable follower strictly rejects writes with `503 REPLICATION_UNAVAILABLE` before WAL append. Standalone development mode requires explicit opt-in (`STANDALONE_MODE=true` or `allow_standalone=True`) and is clearly separated from replicated production guarantees.
 - **Clock Assumptions:** Elapsed monotonic clock time is used locally for leases; cross-machine clock synchronization is not required.
 - **Single-Writer Shard Model:** One write at a time per shard lock provides serialized writes within each individual shard; cross-shard multi-document transactions are not coordinated.
 

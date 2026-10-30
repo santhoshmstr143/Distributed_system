@@ -80,6 +80,10 @@ class Settings(BaseSettings):
         default=False,
         description="Enable crash-point hooks for fault tests. NEVER true in production.",
     )
+    STANDALONE_MODE: bool = Field(
+        default=False,
+        description="Explicit opt-in for standalone development mode (unreplicated commits).",
+    )
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = Field(

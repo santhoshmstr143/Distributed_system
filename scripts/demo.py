@@ -179,12 +179,18 @@ async def run_demo(fast: bool = True) -> None:
         t_s1_f = ASGITransport(app=app_s1_f)
         t_s2_f = ASGITransport(app=app_s2_f)
 
+        app_s0_p.state.node.follower_url = "http://127.0.0.1:8201"
+        app_s0_p.state.node.follower_state = ReplicaState.SYNCED
         app_s0_p.state.node.http_client = AsyncClient(
             mounts={"http://127.0.0.1:8201": t_s0_f}, timeout=1.0
         )
+        app_s1_p.state.node.follower_url = "http://127.0.0.1:8203"
+        app_s1_p.state.node.follower_state = ReplicaState.SYNCED
         app_s1_p.state.node.http_client = AsyncClient(
             mounts={"http://127.0.0.1:8203": t_s1_f}, timeout=1.0
         )
+        app_s2_p.state.node.follower_url = "http://127.0.0.1:8205"
+        app_s2_p.state.node.follower_state = ReplicaState.SYNCED
         app_s2_p.state.node.http_client = AsyncClient(
             mounts={"http://127.0.0.1:8205": t_s2_f}, timeout=1.0
         )

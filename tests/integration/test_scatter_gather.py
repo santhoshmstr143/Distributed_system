@@ -52,6 +52,7 @@ def _make_settings(data_dir: Path | str) -> Settings:
         ADMIN_TOKEN=ADMIN,
         CLIENT_API_KEY=CLIENT_KEY,
         DATA_DIR=str(data_dir),
+        STANDALONE_MODE=True,
     )
 
 

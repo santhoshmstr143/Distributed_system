@@ -48,7 +48,7 @@ Benchmarks were executed on an isolated test node with the following specificati
 - **Processor:** x86_64 architecture (16 physical/logical cores)
 - **OS Platform:** Linux 7.0.0-38-generic
 - **Runtime:** Python 3.11.15
-- **Commit:** `fd8dac3`
+- **Commit:** `9d9ea9a`
 
 ---
 
@@ -106,17 +106,17 @@ Evaluated across range sizes with concurrent read/write workloads:
 
 ---
 
-### 3.5 Throughput & Scalability
+### 3.5 Synchronously Replicated Throughput & Scalability
 
-Throughput and latency percentiles under 70/30 read/write traffic:
+Throughput and latency percentiles under 70/30 read/write traffic across the 3-shard cluster with synchronous replication enabled on all primary-follower pairs:
 
-| Concurrency Level | Throughput (ops/sec) | p50 Latency (ms) | p95 Latency (ms) | Error Rate |
-|:---:|:---:|:---:|:---:|:---:|
-| **1 client** | 73.66 ops/s | 9.22 ms | 9.69 ms | 0.00% |
-| **5 clients** | 71.93 ops/s | 34.34 ms | 47.50 ms | 0.00% |
-| **10 clients** | 74.31 ops/s | 64.44 ms | 80.69 ms | 0.00% |
-| **25 clients** | 73.86 ops/s | 149.17 ms | 183.73 ms | 0.00% |
-| **50 clients** | 79.01 ops/s | 306.18 ms | 353.34 ms | 0.00% |
+| Concurrency Level | Throughput (ops/sec) | p50 Latency (ms) | p95 Latency (ms) | p99 Latency (ms) | Error Rate |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **1 client** | 83.45 ops/s | 2.11 ms | 42.98 ms | 43.99 ms | 0.00% |
+| **5 clients** | 72.10 ops/s | 47.64 ms | 180.22 ms | 220.86 ms | 0.00% |
+| **10 clients** | 69.25 ops/s | 55.88 ms | 408.65 ms | 449.38 ms | 0.00% |
+| **25 clients** | 69.16 ops/s | 61.94 ms | 1115.61 ms | 1177.27 ms | 0.00% |
+| **50 clients** | 66.15 ops/s | 67.22 ms | 2329.62 ms | 2413.97 ms | 0.00% |
 
 ![Throughput and Latency Scalability](figures/throughput_latency.png)
 
@@ -135,7 +135,7 @@ Throughput and latency percentiles under 70/30 read/write traffic:
 
 ## 5. Verification Checklist & Gate Certification
 
-- [x] All 218 unit, integration, security, and fault tests passing (`make check`).
+- [x] All 253 unit, integration, security, and fault tests passing (252 passed + 1 skipped without Docker; 253 passed with live cluster).
 - [x] Static type analysis clean with `mypy --strict`.
 - [x] Zero high/medium security issues detected via `bandit` and `pip-audit`.
 - [x] End-to-end interactive demo (`make demo`) verified.

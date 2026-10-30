@@ -67,6 +67,7 @@ def main() -> None:
         role=role,
         follower_url=follower_url,
         lease_expires_at=initial_lease,
+        allow_standalone=standalone,
     )
 
     uvicorn.run(app, host=host, port=port, log_config=None)

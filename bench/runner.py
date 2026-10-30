@@ -103,47 +103,64 @@ async def run_throughput_latency_suite(
             DATA_DIR=str(tmp_path),
         )
 
-        app_s0 = build_app(
-            settings,
-            node_id="n0",
-            shard_id="shard0",
-            role=NodeRole.PRIMARY,
-            ranges=[ShardRangeConfig(start=0, end=_S1, ownership_epoch=1)],
-        )
-        app_s1 = build_app(
-            settings,
-            node_id="n1",
-            shard_id="shard1",
-            role=NodeRole.PRIMARY,
-            ranges=[ShardRangeConfig(start=_S1, end=_S2, ownership_epoch=1)],
-        )
-        app_s2 = build_app(
-            settings,
-            node_id="n2",
-            shard_id="shard2",
-            role=NodeRole.PRIMARY,
-            ranges=[ShardRangeConfig(start=_S2, end=KEY_SPACE_END, ownership_epoch=1)],
-        )
+        # 3 shards, each with primary and follower (replicated cluster)
+        shard_apps: dict[str, Any] = {}
+        transports: dict[str, ASGITransport] = {}
 
-        shard_transports = {
-            "127.0.0.1:8200": ASGITransport(app=app_s0),
-            "127.0.0.1:8202": ASGITransport(app=app_s1),
-            "127.0.0.1:8204": ASGITransport(app=app_s2),
-        }
+        for i, (start, end) in enumerate([(0, _S1), (_S1, _S2), (_S2, KEY_SPACE_END)]):
+            sid = f"shard{i}"
+            ranges = [ShardRangeConfig(start=start, end=end, ownership_epoch=1)]
+            app_p = build_app(
+                settings.model_copy(update={"DATA_DIR": str(tmp_path / f"p{i}")}),
+                node_id=f"node{i}-p",
+                shard_id=sid,
+                role=NodeRole.PRIMARY,
+                ranges=ranges,
+                follower_url=f"127.0.0.1:{8201 + i*2}",
+            )
+            app_f = build_app(
+                settings.model_copy(update={"DATA_DIR": str(tmp_path / f"f{i}")}),
+                node_id=f"node{i}-f",
+                shard_id=sid,
+                role=NodeRole.FOLLOWER,
+                ranges=ranges,
+            )
+            p_addr = f"127.0.0.1:{8200 + i*2}"
+            f_addr = f"127.0.0.1:{8201 + i*2}"
+
+            trans_p = ASGITransport(app=app_p)
+            trans_f = ASGITransport(app=app_f)
+
+            shard_apps[p_addr] = app_p
+            shard_apps[f_addr] = app_f
+            transports[p_addr] = trans_p
+            transports[f_addr] = trans_f
 
         mgr = ShardMapManager()
         mgr.set_map(create_default_3_shard_map())
-        router_app = build_router_app(settings, mgr, shard_transports=shard_transports)
+        router_app = build_router_app(settings, mgr, shard_transports=transports)
 
         results: list[dict[str, Any]] = []
         raw_rows: list[dict[str, Any]] = []
 
-        async with (
-            LifespanManager(app_s0),
-            LifespanManager(app_s1),
-            LifespanManager(app_s2),
-            LifespanManager(router_app),
-        ):
+        shard_lifespans = [LifespanManager(a) for a in shard_apps.values()]
+        lifespans = [*shard_lifespans, LifespanManager(router_app)]
+
+        for ls in lifespans:
+            await ls.__aenter__()
+
+        try:
+            for i in range(3):
+                p_addr = f"127.0.0.1:{8200 + i*2}"
+                f_addr = f"127.0.0.1:{8201 + i*2}"
+                shard_apps[p_addr].state.node.http_client = AsyncClient(
+                    mounts={f"http://{f_addr}": transports[f_addr]}, timeout=5.0
+                )
+                shard_apps[f_addr].state.node.http_client = AsyncClient(
+                    mounts={f"http://{p_addr}": transports[p_addr]}, timeout=5.0
+                )
+                shard_apps[p_addr].state.node.follower_state = ReplicaState.SYNCED
+
             router_trans = ASGITransport(app=router_app)
             async with AsyncClient(transport=router_trans, base_url="http://router") as client:
                 from docstore.client.client import AsyncDocStoreClient
@@ -155,9 +172,13 @@ async def run_throughput_latency_suite(
                 )
 
                 # Seed cluster
-                print("Seeding cluster with 500 documents across 3 shards...")
+                print("Seeding replicated cluster with 500 documents across 3 shards...")
                 load_gen = LoadGenerator(doc_client, LoadConfig(key_min=0, key_max=100000))
-                await load_gen.seed_data(500)
+                seeded_count = await load_gen.seed_data(500)
+                seeded_keys = set(load_gen._existing_keys)
+                print(
+                    f"Seeded {seeded_count} documents across 3 shards (tracked keys: {len(seeded_keys)})..."
+                )
 
                 # Test concurrencies
                 concurrencies = [1, 5, 10, 25, 50]
@@ -170,8 +191,10 @@ async def run_throughput_latency_suite(
                         warmup_ops=50,
                         seed=42 + c,
                     )
-                    gen = LoadGenerator(doc_client, cfg)
+                    gen = LoadGenerator(doc_client, cfg, existing_keys=seeded_keys)
                     res = await gen.run()
+                    seeded_keys.update(gen._existing_keys)
+
                     entry = {
                         "concurrency": c,
                         "shards": 3,
@@ -188,11 +211,14 @@ async def run_throughput_latency_suite(
                     print(
                         f"Concurrency={c:2d} -> Throughput: {res.throughput_ops_sec:6.1f} ops/s, "
                         f"p50: {res.latency_p50_ms:5.2f} ms, p95: {res.latency_p95_ms:5.2f} ms, "
-                        f"p99: {res.latency_p99_ms:5.2f} ms"
+                        f"p99: {res.latency_p99_ms:5.2f} ms, errors: {res.error_ops}"
                     )
 
                     for lat in res.latencies_ms:
                         raw_rows.append({"concurrency": c, "latency_ms": lat})
+        finally:
+            for ls in reversed(lifespans):
+                await ls.__aexit__(None, None, None)
 
         # Save JSON & CSV
         with open(results_dir / "throughput_latency.json", "w") as f:

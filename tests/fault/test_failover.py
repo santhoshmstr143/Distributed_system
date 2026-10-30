@@ -418,7 +418,7 @@ async def test_crash_point_1_before_wal_append(tmp_path: Path) -> None:
     settings = _make_settings(tmp_path)
     ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
 
-    app = build_app(settings, node_id="p1", shard_id="shard0", ranges=ranges)
+    app = build_app(settings, node_id="p1", shard_id="shard0", ranges=ranges, allow_standalone=True)
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

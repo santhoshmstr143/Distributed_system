@@ -158,6 +158,7 @@ class NodeState:
         self.http_client: httpx.AsyncClient | None = None
         self.paused_ranges: list[tuple[int, int]] = []
         self.pending_unresolved_writes: dict[str, dict[str, Any]] = {}
+        self.allow_standalone: bool = False
 
     def owns(self, doc_id: int) -> bool:
         return any(r.start <= doc_id < r.end for r in self.ranges)
@@ -375,7 +376,7 @@ async def _replicate_to_follower(
 ) -> bool:
     """Primary sends operation to follower and awaits fsynced acknowledgement."""
     if not state.follower_url:
-        return True
+        return False
 
     client = state.http_client
     owns_client = False
@@ -654,8 +655,13 @@ async def _execute_write(
                     meta=state.response_meta(doc_id),
                 )
 
-        # 6. Follower SYNCED check (if replicated)
-        if state.follower_url:
+        # 6. Replicated follower check (or explicit standalone mode)
+        if not state.follower_url:
+            if not state.allow_standalone:
+                raise ReplicationUnavailable(
+                    "Primary has no configured follower; synchronous replication unavailable."
+                )
+        else:
             if state.follower_state != ReplicaState.SYNCED:
                 raise ReplicationUnavailable(
                     f"Follower is {state.follower_state.value}; write rejected before WAL append."
@@ -727,9 +733,14 @@ async def _execute_write(
             state.committed_seq = max(state.committed_seq, seq)
             state.pending_unresolved_writes.pop(request_id, None)
             _persist_node_metadata(state)
-        else:
+        elif state.allow_standalone:
+            # Explicit standalone mode: local-only commit (clearly distinguished)
             state.committed_seq = max(state.committed_seq, seq)
             _persist_node_metadata(state)
+        else:
+            raise ReplicationUnavailable(
+                "Primary has no configured follower; cannot commit without synchronous replication."
+            )
 
         # 9. Apply to memory state via engine.apply() — unified idempotent codepath (M3)
         apply_entry = {
@@ -957,12 +968,18 @@ def build_app(
     coordinator_url: str | None = None,
     coordinator_transport: httpx.AsyncBaseTransport | None = None,
     http_client: httpx.AsyncClient | None = None,
+    allow_standalone: bool = False,
 ) -> FastAPI:
     """Factory: create and return the configured FastAPI shard-node app."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         state = NodeState(settings, node_id=node_id, shard_id=shard_id)
+        state.allow_standalone = (
+            allow_standalone
+            or getattr(settings, "STANDALONE_MODE", False)
+            or (os.environ.get("STANDALONE_MODE", "false").lower() == "true")
+        )
         if ranges:
             state.ranges = list(ranges)
         state.role = role

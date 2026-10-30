@@ -92,11 +92,16 @@ def compute_percentiles(values: list[float]) -> dict[str, float]:
 class LoadGenerator:
     """Orchestrates concurrent read/write load against a Docstore cluster."""
 
-    def __init__(self, client: AsyncDocStoreClient, config: LoadConfig | None = None) -> None:
+    def __init__(
+        self,
+        client: AsyncDocStoreClient,
+        config: LoadConfig | None = None,
+        existing_keys: set[int] | None = None,
+    ) -> None:
         self.client = client
         self.config = config or LoadConfig()
         self._rng = random.Random(self.config.seed)
-        self._existing_keys: set[int] = set()
+        self._existing_keys: set[int] = set(existing_keys) if existing_keys is not None else set()
 
     def _generate_payload(self, doc_id: int) -> dict[str, Any]:
         padding = "x" * max(1, self.config.value_size_bytes - 32)
@@ -120,8 +125,14 @@ class LoadGenerator:
                 self._existing_keys.add(curr)
                 seeded += 1
             except Exception:
-                # May already exist, still record as existing key
-                self._existing_keys.add(curr)
+                # Do not blindly add if insert failed; verify existence before adding
+                try:
+                    existing = await self.client.get(curr)
+                    if existing is not None:
+                        self._existing_keys.add(curr)
+                        seeded += 1
+                except Exception:
+                    pass
             curr += step
             if curr >= self.config.key_max:
                 break
@@ -165,10 +176,11 @@ class LoadGenerator:
         queue: asyncio.Queue[tuple[bool, int]] = asyncio.Queue()
 
         # Pre-generate planned operations deterministically
+        keys_pool = sorted(self._existing_keys)
         for _ in range(num_ops):
             is_read = self._rng.random() < self.config.read_ratio
-            if is_read and self._existing_keys:
-                key = self._rng.choice(list(self._existing_keys))
+            if is_read and keys_pool:
+                key = self._rng.choice(keys_pool)
             else:
                 key = self._rng.randint(self.config.key_min, self.config.key_max)
             queue.put_nowait((is_read, key))

@@ -9,44 +9,44 @@
     "runs": 5
   },
   "failover_time_ms": {
-    "mean": 606.466,
-    "min": 605.51,
-    "max": 607.71,
-    "p50": 606.0,
-    "p95": 607.71
+    "mean": 628.55,
+    "min": 626.4,
+    "max": 629.71,
+    "p50": 629.39,
+    "p95": 629.71
   },
   "write_restoration_time_ms": {
-    "mean": 847.756,
-    "min": 832.05,
-    "max": 893.37,
-    "p50": 838.79,
-    "p95": 893.37
+    "mean": 900.086,
+    "min": 889.68,
+    "max": 929.12,
+    "p50": 894.05,
+    "p95": 929.12
   },
   "runs": [
     {
       "run": 1,
-      "failover_time_ms": 605.96,
-      "write_restoration_time_ms": 832.05
+      "failover_time_ms": 627.64,
+      "write_restoration_time_ms": 893.13
     },
     {
       "run": 2,
-      "failover_time_ms": 605.51,
-      "write_restoration_time_ms": 893.37
+      "failover_time_ms": 626.4,
+      "write_restoration_time_ms": 889.68
     },
     {
       "run": 3,
-      "failover_time_ms": 606.0,
-      "write_restoration_time_ms": 832.31
+      "failover_time_ms": 629.39,
+      "write_restoration_time_ms": 894.45
     },
     {
       "run": 4,
-      "failover_time_ms": 607.71,
-      "write_restoration_time_ms": 838.79
+      "failover_time_ms": 629.71,
+      "write_restoration_time_ms": 929.12
     },
     {
       "run": 5,
-      "failover_time_ms": 607.15,
-      "write_restoration_time_ms": 842.26
+      "failover_time_ms": 629.61,
+      "write_restoration_time_ms": 894.05
     }
   ]
 }

@@ -320,6 +320,7 @@ async def test_follower_catchup_endpoint(tmp_path: Path) -> None:
         shard_id="shard0",
         role=NodeRole.PRIMARY,
         ranges=ranges,
+        allow_standalone=True,
     )
 
     async with LifespanManager(primary_app):
