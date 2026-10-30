@@ -83,6 +83,7 @@ bench:           ## Run performance benchmarks and generate figures
 # ── Docker ───────────────────────────────────────────────────────────────────
 .PHONY: up
 up:              ## Start the full Docker Compose cluster
+	@if [ ! -f .env ]; then cp .env.example .env; fi
 	docker compose -f docker/docker-compose.yml up -d
 
 .PHONY: down

@@ -518,7 +518,7 @@ curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
 | **13** | ✅ Done | M7 Gate | Benchmarking suite, metrics runner, publication plots |
 | **14** | ✅ Done | M7 Gate | Scripted end-to-end interactive demo (`make demo`) |
 | **15** | ✅ Done | M7 Gate | Final architecture & consistency documentation and report (`docs/REPORT.md`, `docs/report.tex`) |
-| **11** | ⬜ | M7 Gate | Dockerfile and Docker Compose deployment |
+| **11** | ✅ Done | M7 Gate | Production Dockerfile and Docker Compose deployment (`make up`) |
 | **16** | ⬜ | M7 Gate | Final release v1.0.0 |
 
 ---

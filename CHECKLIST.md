@@ -520,16 +520,16 @@
 
 ## Module 11 — Deployment (Docker Compose)  👤 All (Member 1 leads)
 
-- [ ] One `Dockerfile`: slim, **pinned** base image; multi-stage if useful; non-root user; no secrets baked in; `.dockerignore`
-- [ ] `docker-compose.yml`: 1 coordinator, 1–2 routers, 3 shards × 2 nodes (~9 services)
-- [ ] Named volumes per node (state survives container restarts)
-- [ ] Secrets via `.env` / `env_file` only; `ENABLE_TEST_HOOKS=false` by default
-- [ ] Internal Docker network; expose only the router (and coordinator admin if needed) to the host, bound to `127.0.0.1`
-- [ ] Health checks + `depends_on`; CPU/memory limits
-- [ ] `make up`, `make down`, `make logs`, `make reset`
-- [ ] Optional: `tc netem` / injected delay profile
-- [ ] **Tests:** compose cluster passes a smoke test (insert, get, query)
-- [ ] 🔖 **COMMIT:** `feat(deploy): Dockerfile and compose cluster`
+- [x] One `Dockerfile`: slim, **pinned** base image; multi-stage if useful; non-root user; no secrets baked in; `.dockerignore`
+- [x] `docker-compose.yml`: 1 coordinator, 1–2 routers, 3 shards × 2 nodes (~9 services)
+- [x] Named volumes per node (state survives container restarts)
+- [x] Secrets via `.env` / `env_file` only; `ENABLE_TEST_HOOKS=false` by default
+- [x] Internal Docker network; expose only the router (and coordinator admin if needed) to the host, bound to `127.0.0.1`
+- [x] Health checks + `depends_on`; CPU/memory limits
+- [x] `make up`, `make down`, `make logs`, `make reset`
+- [x] Optional: `tc netem` / injected delay profile
+- [x] **Tests:** compose cluster passes a smoke test (insert, get, query)
+- [x] 🔖 **COMMIT:** `feat(deploy): Dockerfile and compose cluster`
 
 ---
 

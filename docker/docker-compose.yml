@@ -1,0 +1,317 @@
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-coordinator
+    command: >
+      sh -c "if [ ! -f /shared/shard_map.json ]; then cp /config/shard_map.json /shared/shard_map.json; fi;
+             python -m docstore.coordinator"
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8100
+      - SHARD_MAP_PATH=/shared/shard_map.json
+      - DATA_DIR=/data
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - coord_data:/data
+      - shared_map:/shared
+      - ./shard_map.json:/config/shard_map.json:ro
+    ports:
+      - "127.0.0.1:8100:8100"
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  shard0-follower:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-shard0-follower
+    command: python -m docstore.shard
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8201
+      - NODE_ID=shard0-follower
+      - SHARD_ID=shard0
+      - ROLE=follower
+      - DATA_DIR=/data
+      - COORDINATOR_URL=http://coordinator:8100
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - s0_f_data:/data
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8201/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shard0-primary:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-shard0-primary
+    command: python -m docstore.shard
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8200
+      - NODE_ID=shard0-primary
+      - SHARD_ID=shard0
+      - ROLE=primary
+      - FOLLOWER_URL=shard0-follower:8201
+      - DATA_DIR=/data
+      - COORDINATOR_URL=http://coordinator:8100
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - s0_p_data:/data
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      shard0-follower:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shard1-follower:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-shard1-follower
+    command: python -m docstore.shard
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8203
+      - NODE_ID=shard1-follower
+      - SHARD_ID=shard1
+      - ROLE=follower
+      - DATA_DIR=/data
+      - COORDINATOR_URL=http://coordinator:8100
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - s1_f_data:/data
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8203/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shard1-primary:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-shard1-primary
+    command: python -m docstore.shard
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8202
+      - NODE_ID=shard1-primary
+      - SHARD_ID=shard1
+      - ROLE=primary
+      - FOLLOWER_URL=shard1-follower:8203
+      - DATA_DIR=/data
+      - COORDINATOR_URL=http://coordinator:8100
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - s1_p_data:/data
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8202/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      shard1-follower:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shard2-follower:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-shard2-follower
+    command: python -m docstore.shard
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8205
+      - NODE_ID=shard2-follower
+      - SHARD_ID=shard2
+      - ROLE=follower
+      - DATA_DIR=/data
+      - COORDINATOR_URL=http://coordinator:8100
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - s2_f_data:/data
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8205/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+
+  shard2-primary:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-shard2-primary
+    command: python -m docstore.shard
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8204
+      - NODE_ID=shard2-primary
+      - SHARD_ID=shard2
+      - ROLE=primary
+      - FOLLOWER_URL=shard2-follower:8205
+      - DATA_DIR=/data
+      - COORDINATOR_URL=http://coordinator:8100
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - s2_p_data:/data
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8204/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      shard2-follower:
+        condition: service_healthy
+    restart: unless-stopped
+
+  router:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: docstore-router
+    command: python -m docstore.router
+    env_file:
+      - ../.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - SHARD_MAP_PATH=/shared/shard_map.json
+      - ENABLE_TEST_HOOKS=false
+    volumes:
+      - shared_map:/shared
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - docstore_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      shard0-primary:
+        condition: service_healthy
+      shard1-primary:
+        condition: service_healthy
+      shard2-primary:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  coord_data:
+  s0_p_data:
+  s0_f_data:
+  s1_p_data:
+  s1_f_data:
+  s2_p_data:
+  s2_f_data:
+  shared_map:
+
+networks:
+  docstore_net:
+    driver: bridge

@@ -1,0 +1,38 @@
+{
+  "map_version": 1,
+  "entries": [
+    {
+      "shard_id": "shard0",
+      "range": {
+        "start": 0,
+        "end": 3074457345618258602
+      },
+      "primary": "shard0-primary:8200",
+      "follower": "shard0-follower:8201",
+      "ownership_epoch": 1,
+      "map_version": 1
+    },
+    {
+      "shard_id": "shard1",
+      "range": {
+        "start": 3074457345618258602,
+        "end": 6148914691236517204
+      },
+      "primary": "shard1-primary:8202",
+      "follower": "shard1-follower:8203",
+      "ownership_epoch": 1,
+      "map_version": 1
+    },
+    {
+      "shard_id": "shard2",
+      "range": {
+        "start": 6148914691236517204,
+        "end": 9223372036854775808
+      },
+      "primary": "shard2-primary:8204",
+      "follower": "shard2-follower:8205",
+      "ownership_epoch": 1,
+      "map_version": 1
+    }
+  ]
+}
