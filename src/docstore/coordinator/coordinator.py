@@ -37,6 +37,7 @@ from docstore.common.models import (
     ReplicaState,
     ShardMap,
     ShardMapEntry,
+    ShardRange,
 )
 from docstore.router.shard_map import ShardMapManager, create_default_3_shard_map
 
@@ -93,6 +94,10 @@ class CoordinatorService:
         self.replica_states: dict[str, ReplicaState] = {}  # shard_id -> ReplicaState
         self.failover_metrics: list[dict[str, Any]] = []
         self.failover_in_progress: set[str] = set()
+
+        from docstore.coordinator.migration import MigrationManager
+
+        self.migration_mgr = MigrationManager(settings.DATA_DIR, settings.CLUSTER_SECRET)
 
         # Initialize shard terms
         for entry in self.map_mgr.shard_map.entries:
@@ -384,23 +389,78 @@ class CoordinatorService:
 
         return promoted
 
-    def bump_range_migration(self, shard_id: str, start: int, end: int) -> None:
-        """Bump ownership_epoch of the specific migrated range only."""
+    def bump_range_migration(
+        self,
+        shard_id: str,
+        start: int,
+        end: int,
+        new_shard_id: str | None = None,
+    ) -> int:
+        """Bump ownership_epoch of migrated range, optionally reassigning to new_shard_id."""
         current_map = self.map_mgr.shard_map
         new_entries = []
         found = False
+        new_epoch = 1
+
+        dest_primary = None
+        dest_follower = None
+        if new_shard_id:
+            for e in current_map.entries:
+                if e.shard_id == new_shard_id:
+                    dest_primary = e.primary
+                    dest_follower = e.follower
+                    break
 
         for entry in current_map.entries:
-            if entry.shard_id == shard_id and entry.range.start == start and entry.range.end == end:
+            if entry.shard_id == shard_id and entry.range.start <= start and end <= entry.range.end:
                 found = True
-                new_entries.append(
-                    entry.model_copy(
-                        update={
-                            "ownership_epoch": entry.ownership_epoch + 1,
-                            "map_version": current_map.map_version + 1,
-                        }
+                new_epoch = entry.ownership_epoch + 1
+
+                if entry.range.start == start and entry.range.end == end:
+                    new_entries.append(
+                        entry.model_copy(
+                            update={
+                                "shard_id": new_shard_id or entry.shard_id,
+                                "primary": dest_primary or entry.primary,
+                                "follower": dest_follower or entry.follower,
+                                "ownership_epoch": new_epoch,
+                                "map_version": current_map.map_version + 1,
+                            }
+                        )
                     )
-                )
+                else:
+                    if entry.range.start < start:
+                        new_entries.append(
+                            ShardMapEntry(
+                                shard_id=entry.shard_id,
+                                range=ShardRange(start=entry.range.start, end=start),
+                                primary=entry.primary,
+                                follower=entry.follower,
+                                ownership_epoch=entry.ownership_epoch,
+                                map_version=current_map.map_version + 1,
+                            )
+                        )
+                    new_entries.append(
+                        ShardMapEntry(
+                            shard_id=new_shard_id or entry.shard_id,
+                            range=ShardRange(start=start, end=end),
+                            primary=dest_primary or entry.primary,
+                            follower=dest_follower or entry.follower,
+                            ownership_epoch=new_epoch,
+                            map_version=current_map.map_version + 1,
+                        )
+                    )
+                    if end < entry.range.end:
+                        new_entries.append(
+                            ShardMapEntry(
+                                shard_id=entry.shard_id,
+                                range=ShardRange(start=end, end=entry.range.end),
+                                primary=entry.primary,
+                                follower=entry.follower,
+                                ownership_epoch=entry.ownership_epoch,
+                                map_version=current_map.map_version + 1,
+                            )
+                        )
             else:
                 new_entries.append(
                     entry.model_copy(update={"map_version": current_map.map_version + 1})
@@ -409,8 +469,18 @@ class CoordinatorService:
         if not found:
             raise ValueError(f"Range [{start}, {end}) not found for shard {shard_id!r}")
 
+        new_entries.sort(key=lambda e: e.range.start)
         new_map = ShardMap(map_version=current_map.map_version + 1, entries=new_entries)
         self.map_mgr.save(new_map)
+        logger.info(
+            "Bumped range migration for [%d, %d): epoch=%d map_v=%d to_shard=%s",
+            start,
+            end,
+            new_epoch,
+            new_map.map_version,
+            new_shard_id,
+        )
+        return new_epoch
 
     # ── Node Registration & Role Assignment ───────────────────────────────────
 

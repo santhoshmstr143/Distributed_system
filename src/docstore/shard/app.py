@@ -68,6 +68,7 @@ from docstore.common.errors import (
     NotPrimary,
     OutcomeUnknown,
     OutOfRange,
+    RangePaused,
     ReplicationUnavailable,
     StaleTerm,
 )
@@ -154,6 +155,7 @@ class NodeState:
         self.follower_acked_seq: int = 0
         self.primary_seq: int = 0  # tracked by follower for lag measurement
         self.http_client: httpx.AsyncClient | None = None
+        self.paused_ranges: list[tuple[int, int]] = []
 
     def owns(self, doc_id: int) -> bool:
         return any(r.start <= doc_id < r.end for r in self.ranges)
@@ -345,7 +347,11 @@ async def _execute_write(
             rem = state.remaining_lease()
             raise LeaseExpired(f"Primary lease remaining ({rem:.2f}s) <= T+M ({min_lease:.2f}s).")
 
-        # 3. Range ownership
+        # 3. Range ownership & pause check
+        for p_start, p_end in state.paused_ranges:
+            if p_start <= doc_id < p_end:
+                raise RangePaused(f"Range [{p_start}, {p_end}) is paused for migration.")
+
         if not state.owns(doc_id):
             raise OutOfRange(
                 f"doc_id={doc_id} is outside all ranges owned by shard {state.shard_id}."
@@ -1233,6 +1239,263 @@ def build_app(
                 state.follower_url,
             )
             return {"status": "ok", "follower_state": "SYNCED"}
+
+    # ── Live Range Migration Internal Endpoints (Module 9) ────────────────────
+
+    @app.post("/internal/migration/snapshot", dependencies=[Depends(cluster_auth)])
+    async def migration_snapshot(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        async with state.write_lock():
+            s_seq = state.wal.last_seq if state.wal else 0
+            docs = state.engine.range_snapshot(start, end)
+            return {
+                "status": "ok",
+                "snapshot_seq": s_seq,
+                "documents": docs,
+            }
+
+    @app.post("/internal/migration/oplog", dependencies=[Depends(cluster_auth)])
+    async def migration_oplog(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        after_seq = body.get("after_seq", 0)
+        limit = body.get("limit", 1000)
+
+        assert state.wal is not None
+        matched_entries = []
+        for entry in state.wal.replay(after_seq=after_seq):
+            doc_id = entry.get("doc_id")
+            if doc_id is not None and start <= doc_id < end:
+                matched_entries.append(entry)
+                if len(matched_entries) >= limit:
+                    break
+
+        return {
+            "status": "ok",
+            "entries": matched_entries,
+            "last_seq": state.wal.last_seq,
+        }
+
+    @app.post("/internal/migration/apply-batch", dependencies=[Depends(cluster_auth)])
+    async def migration_apply_batch(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        docs = body.get("documents", [])
+        mig_id = body.get("migration_id", "mig")
+
+        assert state.wal is not None
+        async with state.write_lock():
+            for doc in docs:
+                doc_id = doc["doc_id"]
+                req_id = f"mig-{mig_id}-{doc_id}"
+                seq = state.wal.next_seq()
+                wal_entry = state.wal.append(
+                    seq=seq,
+                    op=WriteOp.INSERT.value,
+                    doc_id=doc_id,
+                    term=state.term,
+                    request_id=req_id,
+                    payload=doc,
+                )
+                if state.follower_url:
+                    ok = await _replicate_to_follower(
+                        state, seq, WriteOp.INSERT, doc_id, req_id, doc
+                    )
+                    if not ok:
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "error_code": "REPLICATION_UNAVAILABLE",
+                                "error_message": "Follower replication failed during batch",
+                            },
+                        )
+                    state.follower_acked_seq = max(state.follower_acked_seq, seq)
+
+                state.engine.apply(wal_entry, migration_mode=True)
+            return {"status": "ok", "count": len(docs), "last_seq": state.wal.last_seq}
+
+    @app.post("/internal/migration/apply-oplog", dependencies=[Depends(cluster_auth)])
+    async def migration_apply_oplog(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        entries = body.get("entries", [])
+        mig_id = body.get("migration_id", "mig")
+
+        assert state.wal is not None
+        async with state.write_lock():
+            for entry in entries:
+                doc_id = entry["doc_id"]
+                op = WriteOp(entry["op"])
+                payload = entry.get("payload")
+                req_id = f"catchup-{mig_id}-{doc_id}-{entry['seq']}"
+
+                seq = state.wal.next_seq()
+                wal_entry = state.wal.append(
+                    seq=seq,
+                    op=op.value,
+                    doc_id=doc_id,
+                    term=state.term,
+                    request_id=req_id,
+                    payload=payload,
+                )
+                if state.follower_url:
+                    ok = await _replicate_to_follower(state, seq, op, doc_id, req_id, payload)
+                    if not ok:
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "error_code": "REPLICATION_UNAVAILABLE",
+                                "error_message": "Follower replication failed during catchup",
+                            },
+                        )
+                    state.follower_acked_seq = max(state.follower_acked_seq, seq)
+
+                state.engine.apply(wal_entry, migration_mode=True)
+            return {"status": "ok", "replayed": len(entries), "last_seq": state.wal.last_seq}
+
+    @app.post("/internal/migration/pause", dependencies=[Depends(cluster_auth)])
+    async def migration_pause(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        async with state.write_lock():
+            if (start, end) not in state.paused_ranges:
+                state.paused_ranges.append((start, end))
+            final_seq = state.wal.last_seq if state.wal else 0
+            logger.info(
+                "Paused range [%d, %d) on shard %s at seq %d",
+                start,
+                end,
+                state.shard_id,
+                final_seq,
+            )
+            return {"status": "paused", "final_seq": final_seq}
+
+    @app.post("/internal/migration/unpause", dependencies=[Depends(cluster_auth)])
+    async def migration_unpause(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        async with state.write_lock():
+            state.paused_ranges = [
+                r for r in state.paused_ranges if not (r[0] == start and r[1] == end)
+            ]
+            logger.info("Unpaused range [%d, %d) on shard %s", start, end, state.shard_id)
+            return {"status": "ok"}
+
+    @app.post("/internal/migration/checksum", dependencies=[Depends(cluster_auth)])
+    async def migration_checksum(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        async with state.write_lock():
+            docs = state.engine.range_snapshot(start, end)
+            from docstore.coordinator.migration import compute_deterministic_checksum
+
+            count, chk = compute_deterministic_checksum(docs)
+            return {"status": "ok", "doc_count": count, "checksum": chk}
+
+    @app.post("/internal/migration/cutover", dependencies=[Depends(cluster_auth)])
+    async def migration_cutover(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        epoch = body["ownership_epoch"]
+        async with state.write_lock():
+            existing = next((r for r in state.ranges if r.start == start and r.end == end), None)
+            if existing:
+                existing.ownership_epoch = epoch
+            else:
+                state.ranges.append(ShardRangeConfig(start=start, end=end, ownership_epoch=epoch))
+                state.ranges.sort(key=lambda r: r.start)
+            logger.info(
+                "Cutover range [%d, %d) epoch %d to shard %s (node %s)",
+                start,
+                end,
+                epoch,
+                state.shard_id,
+                state.node_id,
+            )
+            return {"status": "ok", "ranges": [r.model_dump() for r in state.ranges]}
+
+    @app.post("/internal/migration/cleanup", dependencies=[Depends(cluster_auth)])
+    async def migration_cleanup(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        async with state.write_lock():
+            # 1. Unpause
+            state.paused_ranges = [
+                r for r in state.paused_ranges if not (r[0] == start and r[1] == end)
+            ]
+            # 2. Split or remove from ranges
+            new_ranges = []
+            for r in state.ranges:
+                if r.start < start and r.end > end:
+                    new_ranges.append(
+                        ShardRangeConfig(
+                            start=r.start, end=start, ownership_epoch=r.ownership_epoch
+                        )
+                    )
+                    new_ranges.append(
+                        ShardRangeConfig(start=end, end=r.end, ownership_epoch=r.ownership_epoch)
+                    )
+                elif r.start >= start and r.end <= end:
+                    continue
+                else:
+                    new_ranges.append(r)
+            state.ranges = new_ranges
+
+            # 3. Delete docs from storage engine
+            docs = state.engine.range_snapshot(start, end)
+            for d in docs:
+                doc_id = d["doc_id"]
+                if state.wal:
+                    seq = state.wal.next_seq()
+                    req_id = f"cleanup-{doc_id}"
+                    state.wal.append(
+                        seq=seq,
+                        op=WriteOp.DELETE.value,
+                        doc_id=doc_id,
+                        term=state.term,
+                        request_id=req_id,
+                        payload=None,
+                    )
+                    if state.follower_url:
+                        await _replicate_to_follower(
+                            state, seq, WriteOp.DELETE, doc_id, req_id, None
+                        )
+                state.engine._docs.pop(doc_id, None)
+                state.engine._index.pop(doc_id, None)
+                state.engine._doc_seq.pop(doc_id, None)
+            logger.info(
+                "Cleaned up range [%d, %d) on source shard %s (%d docs removed)",
+                start,
+                end,
+                state.shard_id,
+                len(docs),
+            )
+            return {"status": "ok", "deleted_docs": len(docs)}
+
+    @app.post("/internal/migration/abort", dependencies=[Depends(cluster_auth)])
+    async def migration_abort(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        start = body["start"]
+        end = body["end"]
+        async with state.write_lock():
+            docs = state.engine.range_snapshot(start, end)
+            for d in docs:
+                doc_id = d["doc_id"]
+                state.engine._docs.pop(doc_id, None)
+                state.engine._index.pop(doc_id, None)
+                state.engine._doc_seq.pop(doc_id, None)
+            logger.info(
+                "Aborted migration on destination shard %s; purged %d staged docs",
+                state.shard_id,
+                len(docs),
+            )
+            return {"status": "aborted", "purged_docs": len(docs)}
 
     # ── Error handler ─────────────────────────────────────────────────────────
 

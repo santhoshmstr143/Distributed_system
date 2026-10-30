@@ -455,52 +455,52 @@
 ## Module 9 — Live Range Migration  👤 Member 3 (lead), Member 2 (coordinator side)
 
 **Rules**
-- [ ] Admin API: `POST /admin/migrate {range, from_shard, to_shard}` (admin token)
-- [ ] Only **one active migration per key range** at a time
-- [ ] No migration starts (or continues) on a shard that is mid-failover or degraded (primary without a `SYNCED` follower); a failover during a migration **aborts** it
-- [ ] The source stays the authoritative owner until cutover
-- [ ] **Incoming data on the destination is invisible** (not served, not returned by queries) until cutover
+- [x] Admin API: `POST /admin/migrate {range, from_shard, to_shard}` (admin token)
+- [x] Only **one active migration per key range** at a time
+- [x] No migration starts (or continues) on a shard that is mid-failover or degraded (primary without a `SYNCED` follower); a failover during a migration **aborts** it
+- [x] The source stays the authoritative owner until cutover
+- [x] **Incoming data on the destination is invisible** (not served, not returned by queries) until cutover
 
 **Persisted state machine** (stored by the coordinator)
 `PLANNED → SNAPSHOT_COPY → CATCHUP → PAUSE → FINAL_CATCHUP → VERIFY → CUTOVER → CLEANUP → DONE` (`ABORTED` is the alternative terminal state)
-- [ ] Persist: migration ID, source, destination, key range, snapshot start seq **S**, last copied doc ID, last caught-up seq, current state, final cutover epoch
+- [x] Persist: migration ID, source, destination, key range, snapshot start seq **S**, last copied doc ID, last caught-up seq, current state, final cutover epoch
 
 **Phases**
-- [ ] **SNAPSHOT_COPY:** take a **point-in-time copy of the range at source seq S** under the write lock; record S; stream batches from the frozen copy; the source keeps accepting writes
-- [ ] Destination ingests through its **normal replicated write path** (its own seq numbers; source seq tracked separately as the migration cursor), so its follower is covered
-- [ ] **CATCHUP:** read source oplog entries with seq > S for the range; replay **in order** and **idempotently** (insert → upsert, delete → no-op if missing); track last applied source seq; repeat until the delta is small; source retains WAL from S
-- [ ] **PAUSE:** pause writes for that range only (`RangePaused`); reads continue from the source; wait for in-flight writes; record final source seq **H**
-- [ ] **FINAL_CATCHUP:** replay everything through H; wait until the destination and its follower have durably applied it
-- [ ] **VERIFY:** compare document counts and a **deterministic SHA-256** checksum (documents sorted by `doc_id`, canonical JSON with sorted keys); confirm no missing or duplicate docs
-- [ ] **CUTOVER (commit point):** atomically persist the new shard map with a **bumped `ownership_epoch`**; this durable write is the **point of no return**
-  - [ ] Before the commit point → abort is allowed (destination discards the incoming copy, source unpauses)
-  - [ ] After the commit point → always roll forward
-  - [ ] The source stays paused until the coordinator decides; on restart it asks the coordinator for the migration state; a **maximum pause time** triggers an abort if still before the commit point
-  - [ ] After cutover the source rejects writes and queries for that range; routers refresh
-- [ ] **CLEANUP:** delete old source copies **only after** the new ownership is durable; source then drops the range from its owned set
+- [x] **SNAPSHOT_COPY:** take a **point-in-time copy of the range at source seq S** under the write lock; record S; stream batches from the frozen copy; the source keeps accepting writes
+- [x] Destination ingests through its **normal replicated write path** (its own seq numbers; source seq tracked separately as the migration cursor), so its follower is covered
+- [x] **CATCHUP:** read source oplog entries with seq > S for the range; replay **in order** and **idempotently** (insert → upsert, delete → no-op if missing); track last applied source seq; repeat until the delta is small; source retains WAL from S
+- [x] **PAUSE:** pause writes for that range only (`RangePaused`); reads continue from the source; wait for in-flight writes; record final source seq **H**
+- [x] **FINAL_CATCHUP:** replay everything through H; wait until the destination and its follower have durably applied it
+- [x] **VERIFY:** compare document counts and a **deterministic SHA-256** checksum (documents sorted by `doc_id`, canonical JSON with sorted keys); confirm no missing or duplicate docs
+- [x] **CUTOVER (commit point):** atomically persist the new shard map with a **bumped `ownership_epoch`**; this durable write is the **point of no return**
+  - [x] Before the commit point → abort is allowed (destination discards the incoming copy, source unpauses)
+  - [x] After the commit point → always roll forward
+  - [x] The source stays paused until the coordinator decides; on restart it asks the coordinator for the migration state; a **maximum pause time** triggers an abort if still before the commit point
+  - [x] After cutover the source rejects writes and queries for that range; routers refresh
+- [x] **CLEANUP:** delete old source copies **only after** the new ownership is durable; source then drops the range from its owned set
 
 **Other**
-- [ ] Router retries writes to a paused range with short backoff (bounded); no client error for brief pauses
-- [ ] Reads and queries stay correct during migration (ownership filtering plus dedup)
-- [ ] Metrics: docs copied, catch-up ops replayed, write-pause duration
-- [ ] Crash-safe: coordinator / source / destination restart in any phase → resume or abort cleanly
+- [x] Router retries writes to a paused range with short backoff (bounded); no client error for brief pauses
+- [x] Reads and queries stay correct during migration (ownership filtering plus dedup)
+- [x] Metrics: docs copied, catch-up ops replayed, write-pause duration
+- [x] Crash-safe: coordinator / source / destination restart in any phase → resume or abort cleanly
 
 **Tests**
-- [ ] Insert, update, and delete during snapshot copy (no resurrected or stale documents)
-- [ ] Restart source, destination, coordinator mid-migration (each phase)
-- [ ] Abort before cutover; crash right after the commit point
-- [ ] Old shard rejects writes after cutover; destination follower holds the migrated range
-- [ ] Two concurrent migrations on the same range → second rejected
-- [ ] Counts and checksums match after migration
-- [ ] 🔖 **COMMIT:** `feat(migration): live range migration with catch-up, pause, epoch cutover`
+- [x] Insert, update, and delete during snapshot copy (no resurrected or stale documents)
+- [x] Restart source, destination, coordinator mid-migration (each phase)
+- [x] Abort before cutover; crash right after the commit point
+- [x] Old shard rejects writes after cutover; destination follower holds the migrated range
+- [x] Two concurrent migrations on the same range → second rejected
+- [x] Counts and checksums match after migration
+- [x] 🔖 **COMMIT:** `feat(migration): live range migration with catch-up, pause, epoch cutover`
 
 ### ✅ M6 GATE — Migration works
-- [ ] Migrate a range while the write workload continues
-- [ ] Count + checksum match before/after
-- [ ] Write pause brief and measured
-- [ ] Router and shards agree on the new ownership; old shard rejects the migrated range
-- [ ] Crash-in-each-phase tests green
-- [ ] M6 tests green; lint clean
+- [x] Migrate a range while the write workload continues
+- [x] Count + checksum match before/after
+- [x] Write pause brief and measured
+- [x] Router and shards agree on the new ownership; old shard rejects the migrated range
+- [x] Crash-in-each-phase tests green
+- [x] M6 tests green; lint clean
 
 ---
 

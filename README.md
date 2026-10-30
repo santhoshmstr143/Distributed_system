@@ -174,7 +174,7 @@ python -m docstore.router
 
 ## Testing & Quality Gates
 
-The test suite contains **183 automated tests** covering unit storage, safe query filtering, shard routing, coordinator leases, and replication durability.
+The test suite contains **199 automated tests** covering unit storage, safe query filtering, shard routing, coordinator leases, replication durability, failover fencing, and live range migration.
 
 ### Running Fast Tests (Unit + Integration)
 
@@ -207,6 +207,12 @@ Or directly with `pytest`:
 
 # 6. Single shard node durable HTTP API (Module 3 & M1 Gate)
 .venv/bin/pytest tests/integration/test_shard_node.py -v
+
+# 7. Failover, fencing & rejoin (Module 8 & M5 Gate)
+.venv/bin/pytest tests/fault/test_failover.py -v
+
+# 8. Live range migration & checksum verification (Module 9 & M6 Gate)
+.venv/bin/pytest tests/fault/test_migration.py -v
 ```
 
 ### Full Test Suite with Coverage Report
@@ -381,6 +387,59 @@ curl -X GET http://127.0.0.1:8100/admin/status \
 
 ---
 
+## Live Range Migration (Module 9 / M6)
+
+Live range migration allows transparent rebalancing of key ranges between shards without cluster downtime or data loss:
+
+### 1. Multi-Phase Persisted State Machine
+
+Managed and persisted by the Coordinator under `DATA_DIR/migrations/<id>.json`:
+
+```
+PLANNED ──► SNAPSHOT_COPY ──► CATCHUP ──► PAUSE ──► FINAL_CATCHUP ──► VERIFY ──► CUTOVER ──► CLEANUP ──► DONE
+   │                                                                     │          │
+   └──────────────────────────► ABORTED ◄────────────────────────────────┘          └── (Point of No Return)
+```
+
+- **SNAPSHOT_COPY:** Takes a point-in-time range snapshot at source sequence number $S$ under the source's write lock. Streamed to the destination primary via `/internal/migration/apply-batch`. Source keeps accepting live traffic.
+- **Normal Replicated Write Path:** Destination ingests migrating records through its normal write-path and replicates them synchronously to its follower.
+- **Invisibility Invariant:** Migrating documents on the destination remain invisible to client reads (`GET /doc/{id}`) and queries (`POST /query`) until cutover occurs.
+- **CATCHUP:** Source streams WAL oplog entries with $\text{seq} > S$ overlapping $[start, end)$. Replayed idempotently (insert $\to$ upsert, delete $\to$ no-op if missing) on destination. Repeated until replication lag is minimized.
+- **PAUSE:** Coordinator temporarily pauses writes for the specific key range only (`RANGE_PAUSED`). Reads and queries continue to be served by the source shard.
+- **FINAL_CATCHUP:** Destination catches up with all remaining ops through paused sequence number $H$.
+- **VERIFY:** Coordinator verifies that source and destination have identical document counts and matching deterministic **SHA-256 canonical JSON** checksums (documents sorted by `doc_id`, keys sorted).
+- **CUTOVER (Commit Point):** Coordinator atomically persists the updated shard map with a bumped `ownership_epoch`. This disk write is the **point of no return**:
+  - *Before Cutover:* Any error or failover aborts the migration, safely unpauses the source, and discards destination state.
+  - *After Cutover:* The migration must roll forward. Destination activates ownership; routers refresh.
+- **CLEANUP:** Source deletes old copies and drops the range only after cutover is durable.
+
+### 2. Transparent Cutover & Router Retries
+
+- Router retries transparently on HTTP 503 `RANGE_PAUSED` with bounded exponential backoff (up to 8 attempts, max 0.3s backoff).
+- Router automatically reloads the shard map on epoch bumps and redirects to the new owning shard with zero client-visible errors.
+
+### 3. Admin Migration API
+
+```bash
+# Start an asynchronous live migration
+curl -X POST http://127.0.0.1:8100/admin/migrate \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Token: coordinator-admin-token-32chars-min" \
+  -d '{
+    "from_shard": "shard0",
+    "to_shard": "shard1",
+    "start": 1000,
+    "end": 2000,
+    "sync": false
+  }'
+
+# Inspect migration progress and metrics
+curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
+  -H "X-Admin-Token: coordinator-admin-token-32chars-min"
+```
+
+---
+
 ## Module Roadmap & Status
 
 | Module | Status | Milestone | Description |
@@ -394,7 +453,7 @@ curl -X GET http://127.0.0.1:8100/admin/status \
 | **6** | ✅ Done | M4 Gate | Central Coordinator, monotonic leases, epochs, heartbeats |
 | **7** | ✅ Done | M4 Gate | Sync durable replication, follower reads, catch-up, lag metrics |
 | **8** | ✅ Done | M5 Gate | Failover detection, fencing & demotion/promotion |
-| **9** | ⬜ | M6 Gate | Live range migration, cutover, catchup buffer |
+| **9** | ✅ Done | M6 Gate | Live range migration, catch-up, pause, epoch cutover |
 | **10–16** | ⬜ | M7 Gate | Python client SDK, Docker Compose, hardening, benchmarks, demo |
 
 ---

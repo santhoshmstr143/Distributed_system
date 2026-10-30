@@ -208,14 +208,19 @@ def build_router_app(
         """Route request to owning shard, refreshing map once if node reports stale map."""
         mgr: ShardMapManager = req.app.state.map_mgr
 
+        pause_retries = 0
+        max_pause_retries = 8
+
         # Attempt up to 2 times (initial + 1 retry on stale map or replication unavailable)
-        for attempt in range(2):
+        attempt = 0
+        while attempt < 2:
             try:
                 entry: ShardMapEntry = mgr.get_shard_for_doc_id(doc_id)
             except OutOfRange as exc:
                 if attempt == 0:
                     try:
                         mgr.reload()
+                        attempt += 1
                         continue
                     except Exception as reload_exc:
                         logger.debug("Map reload failed: %s", reload_exc)
@@ -243,6 +248,7 @@ def build_router_app(
                 if attempt == 0:
                     try:
                         mgr.reload()
+                        attempt += 1
                         continue
                     except Exception as reload_exc:
                         logger.debug("Map reload failed: %s", reload_exc)
@@ -257,12 +263,28 @@ def build_router_app(
                 ) from exc
 
             # Check if shard reports stale routing (OutOfRange/StaleEpoch/NotPrimary)
-            # or replication unavailable
-            if resp.status_code in (400, 409, 503) and attempt == 0:
+            # or replication unavailable or range paused
+            if resp.status_code in (400, 409, 503):
                 try:
                     data = resp.json()
                     err_code = data.get("detail", {}).get("error_code") or data.get("error_code")
-                    if err_code in ("OUT_OF_RANGE", "STALE_EPOCH", "NOT_PRIMARY"):
+                    if err_code == "RANGE_PAUSED" and pause_retries < max_pause_retries:
+                        pause_retries += 1
+                        delay = min(0.05 * (1.5**pause_retries), 0.3)
+                        logger.info(
+                            "Range paused for doc_id=%d; retrying (attempt %d/%d, %.2fs)",
+                            doc_id,
+                            pause_retries,
+                            max_pause_retries,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        try:
+                            mgr.reload()
+                        except Exception as reload_exc:
+                            logger.debug("Map reload failed: %s", reload_exc)
+                        continue
+                    if attempt == 0 and err_code in ("OUT_OF_RANGE", "STALE_EPOCH", "NOT_PRIMARY"):
                         logger.warning(
                             "Shard %s returned %s on doc_id=%d; reloading map and retrying once",
                             entry.shard_id,
@@ -270,13 +292,15 @@ def build_router_app(
                             doc_id,
                         )
                         mgr.reload()
+                        attempt += 1
                         continue
-                    if err_code == "REPLICATION_UNAVAILABLE":
+                    if attempt == 0 and err_code == "REPLICATION_UNAVAILABLE":
                         logger.warning(
                             "Shard %s returned REPLICATION_UNAVAILABLE; retrying with backoff",
                             entry.shard_id,
                         )
                         await asyncio.sleep(0.05)
+                        attempt += 1
                         continue
                 except Exception as parse_exc:
                     logger.debug("Failed parsing error body from shard: %s", parse_exc)

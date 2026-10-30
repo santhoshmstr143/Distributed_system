@@ -144,9 +144,85 @@ def build_coordinator_app(
         return {"status": "ok", "shard_id": shard_id, "promoted": True}
 
     @app.post("/admin/migrate", dependencies=[Depends(admin_auth)])
-    async def admin_migrate() -> dict[str, str]:
-        """Placeholder for Module 9."""
-        return {"status": "stub", "message": "Migration not yet implemented"}
+    async def admin_migrate(
+        body: dict[str, Any],
+        sync: bool = False,
+    ) -> dict[str, Any]:
+        """Trigger live range migration from one shard to another."""
+        rng = body.get("range", {})
+        start = rng.get("start")
+        end = rng.get("end")
+        from_shard = body.get("from_shard")
+        to_shard = body.get("to_shard")
+        if start is None or end is None or not from_shard or not to_shard:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "VALIDATION_ERROR",
+                    "error_message": "Missing required fields: range, from_shard, to_shard",
+                },
+            )
+
+        try:
+            rec = svc.migration_mgr.create_migration(
+                from_shard=from_shard,
+                to_shard=to_shard,
+                start=int(start),
+                end=int(end),
+                coord=svc,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": "MIGRATION_CONFLICT", "error_message": str(exc)},
+            ) from exc
+
+        if sync or body.get("sync"):
+            try:
+                completed_rec = await svc.migration_mgr.execute_migration(rec.migration_id, svc)
+                return completed_rec.to_dict()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error_code": "MIGRATION_FAILED", "error_message": str(exc)},
+                ) from exc
+
+        async def _run() -> None:
+            try:
+                await svc.migration_mgr.execute_migration(rec.migration_id, svc)
+            except Exception as exc:
+                logger.error("Background migration %s failed: %s", rec.migration_id, exc)
+
+        task = asyncio.create_task(_run())
+        bg_tasks = getattr(app.state, "_bg_tasks", set())
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
+        app.state._bg_tasks = bg_tasks
+
+        return {
+            "status": "planned",
+            "migration_id": rec.migration_id,
+            "from_shard": rec.from_shard,
+            "to_shard": rec.to_shard,
+            "range": {"start": rec.range_start, "end": rec.range_end},
+        }
+
+    @app.get("/admin/migrate/{migration_id}", dependencies=[Depends(admin_auth)])
+    async def get_migration(migration_id: str) -> dict[str, Any]:
+        rec = svc.migration_mgr.migrations.get(migration_id)
+        if not rec:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error_code": "NOT_FOUND",
+                    "error_message": f"Migration {migration_id} not found",
+                },
+            )
+        return rec.to_dict()
+
+    @app.get("/admin/migrations", dependencies=[Depends(admin_auth)])
+    async def list_migrations() -> list[dict[str, Any]]:
+        return [m.to_dict() for m in svc.migration_mgr.migrations.values()]
 
     # ── Error handler (no stack traces) ───────────────────────────────────────
 
