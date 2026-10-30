@@ -1,0 +1,42 @@
+[
+  {
+    "query_mode": "direct_key_primary",
+    "shards_queried": 1,
+    "samples": 300,
+    "latency_p50_ms": 1.544,
+    "latency_p90_ms": 1.916,
+    "latency_p95_ms": 1.984,
+    "latency_p99_ms": 2.255,
+    "latency_mean_ms": 1.618
+  },
+  {
+    "query_mode": "direct_key_follower",
+    "shards_queried": 1,
+    "samples": 300,
+    "latency_p50_ms": 1.589,
+    "latency_p90_ms": 1.986,
+    "latency_p95_ms": 2.103,
+    "latency_p99_ms": 2.408,
+    "latency_mean_ms": 1.671
+  },
+  {
+    "query_mode": "scatter_gather_1_shard",
+    "shards_queried": 1,
+    "samples": 300,
+    "latency_p50_ms": 6.126,
+    "latency_p90_ms": 6.724,
+    "latency_p95_ms": 7.122,
+    "latency_p99_ms": 9.518,
+    "latency_mean_ms": 6.42
+  },
+  {
+    "query_mode": "scatter_gather_3_shards",
+    "shards_queried": 3,
+    "samples": 300,
+    "latency_p50_ms": 5.821,
+    "latency_p90_ms": 6.262,
+    "latency_p95_ms": 6.351,
+    "latency_p99_ms": 6.504,
+    "latency_mean_ms": 6.006
+  }
+]

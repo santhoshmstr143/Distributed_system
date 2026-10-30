@@ -76,8 +76,9 @@ demo:            ## Run the scripted end-to-end demo
 	@echo "⚠  Demo not yet implemented (Module 14)."
 
 .PHONY: bench
-bench:           ## Run performance benchmarks
-	@echo "⚠  Benchmarks not yet implemented (Module 13)."
+bench:           ## Run performance benchmarks and generate figures
+	PYTHONPATH=src $(VENV)/bin/python -m bench.runner
+	PYTHONPATH=src $(VENV)/bin/python -m bench.plot
 
 # ── Docker ───────────────────────────────────────────────────────────────────
 .PHONY: up

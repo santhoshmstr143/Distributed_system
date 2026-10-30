@@ -1,0 +1,26 @@
+[
+  {
+    "docs_migrated": 500,
+    "docs_moved": 500,
+    "catchup_ops": 0,
+    "pause_duration_ms": 43.98,
+    "total_duration_s": 6.074,
+    "checksum_verified": true
+  },
+  {
+    "docs_migrated": 2000,
+    "docs_moved": 2000,
+    "catchup_ops": 0,
+    "pause_duration_ms": 55.2,
+    "total_duration_s": 24.106,
+    "checksum_verified": true
+  },
+  {
+    "docs_migrated": 5000,
+    "docs_moved": 5000,
+    "catchup_ops": 0,
+    "pause_duration_ms": 77.86,
+    "total_duration_s": 60.262,
+    "checksum_verified": true
+  }
+]

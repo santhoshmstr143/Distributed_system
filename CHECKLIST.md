@@ -565,18 +565,18 @@
 
 ## Module 13 — Benchmarking & Evaluation (`bench/`)  👤 All (Member 3 leads load generator)
 
-- [ ] Async load generator (asyncio + httpx): 100k docs, 70/30 read/write, configurable
-- [ ] Fixed random seed; document hardware and environment
-- [ ] **Query latency** p50/p95/p99: single-shard baseline, direct shard-key routing, scatter-gather, primary vs follower reads; compare **1, 2, 3 shards**
-- [ ] **Throughput** (ops/s), **error rate**, **timeout rate** under the configured workload
-- [ ] **Replication lag:** ops + ms under light and heavy load
-- [ ] **Recovery time (two numbers):** *failover time* (crash → detect → promote → first successful read) and *write-restoration time* (crash → … → old primary restarted and `SYNCED` → first successful write); **≥ 5 independent runs** per setting; report mean and spread; report (H, L, D, T, M) and the restart delay used. When sweeping the timeout, scale H, L and T so that **H < L < D** and **T + M < L − H** always hold
-- [ ] **Migration:** docs moved, catch-up ops, write-pause duration vs range size (e.g., 5k / 20k / 50k docs)
-- [ ] **Integrity:** counts + checksums before/after migration and failover
-- [ ] Raw results in `results/` (CSV/JSON); plots in `docs/figures/`
-- [ ] Warm-up excluded; multiple runs; mean ± spread
-- [ ] `make bench` reproduces everything
-- [ ] 🔖 **COMMIT:** `feat(bench): load generator, metrics, plots`
+- [x] Async load generator (asyncio + httpx): 100k docs, 70/30 read/write, configurable
+- [x] Fixed random seed; document hardware and environment
+- [x] **Query latency** p50/p95/p99: single-shard baseline, direct shard-key routing, scatter-gather, primary vs follower reads; compare **1, 2, 3 shards**
+- [x] **Throughput** (ops/s), **error rate**, **timeout rate** under the configured workload
+- [x] **Replication lag:** ops + ms under light and heavy load
+- [x] **Recovery time (two numbers):** *failover time* (crash → detect → promote → first successful read) and *write-restoration time* (crash → … → old primary restarted and `SYNCED` → first successful write); **≥ 5 independent runs** per setting; report mean and spread; report (H, L, D, T, M) and the restart delay used. When sweeping the timeout, scale H, L and T so that **H < L < D** and **T + M < L − H** always hold
+- [x] **Migration:** docs moved, catch-up ops, write-pause duration vs range size (e.g., 5k / 20k / 50k docs)
+- [x] **Integrity:** counts + checksums before/after migration and failover
+- [x] Raw results in `results/` (CSV/JSON); plots in `docs/figures/`
+- [x] Warm-up excluded; multiple runs; mean ± spread
+- [x] `make bench` reproduces everything
+- [x] 🔖 **COMMIT:** `feat(bench): load generator, metrics, plots`
 
 ---
 

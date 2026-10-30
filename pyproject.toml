@@ -41,10 +41,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S", "T20"]  # relax security + print rules in tests
+"tests/**/*.py" = ["S", "T20"]    # relax security + print rules in tests
+"bench/**/*.py" = ["S", "T20"]    # relax security + print rules in benchmarks
+"scripts/**/*.py" = ["S", "T20"]  # relax security + print rules in demo/scripts
 
 [tool.ruff.lint.isort]
-known-first-party = ["docstore"]
+known-first-party = ["docstore", "bench"]
 
 # ─── Mypy ────────────────────────────────────────────────────────────────────
 [tool.mypy]

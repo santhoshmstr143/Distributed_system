@@ -1,0 +1,52 @@
+{
+  "parameters": {
+    "heartbeat_interval_s": 0.1,
+    "lease_duration_s": 0.5,
+    "detection_timeout_s": 0.6,
+    "replication_timeout_s": 0.05,
+    "safety_margin_s": 0.1,
+    "restart_delay_s": 0.15,
+    "runs": 5
+  },
+  "failover_time_ms": {
+    "mean": 606.466,
+    "min": 605.51,
+    "max": 607.71,
+    "p50": 606.0,
+    "p95": 607.71
+  },
+  "write_restoration_time_ms": {
+    "mean": 847.756,
+    "min": 832.05,
+    "max": 893.37,
+    "p50": 838.79,
+    "p95": 893.37
+  },
+  "runs": [
+    {
+      "run": 1,
+      "failover_time_ms": 605.96,
+      "write_restoration_time_ms": 832.05
+    },
+    {
+      "run": 2,
+      "failover_time_ms": 605.51,
+      "write_restoration_time_ms": 893.37
+    },
+    {
+      "run": 3,
+      "failover_time_ms": 606.0,
+      "write_restoration_time_ms": 832.31
+    },
+    {
+      "run": 4,
+      "failover_time_ms": 607.71,
+      "write_restoration_time_ms": 838.79
+    },
+    {
+      "run": 5,
+      "failover_time_ms": 607.15,
+      "write_restoration_time_ms": 842.26
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "concurrency": 1,
+    "shards": 3,
+    "total_ops": 300,
+    "duration_s": 1.2082,
+    "throughput_ops_sec": 73.66,
+    "latency_p50_ms": 9.22,
+    "latency_p90_ms": 9.645,
+    "latency_p95_ms": 9.692,
+    "latency_p99_ms": 9.745,
+    "error_rate": 0.7033
+  },
+  {
+    "concurrency": 5,
+    "shards": 3,
+    "total_ops": 1000,
+    "duration_s": 4.1983,
+    "throughput_ops_sec": 71.93,
+    "latency_p50_ms": 34.335,
+    "latency_p90_ms": 42.35,
+    "latency_p95_ms": 47.495,
+    "latency_p99_ms": 67.722,
+    "error_rate": 0.698
+  },
+  {
+    "concurrency": 10,
+    "shards": 3,
+    "total_ops": 1000,
+    "duration_s": 4.2524,
+    "throughput_ops_sec": 74.31,
+    "latency_p50_ms": 64.443,
+    "latency_p90_ms": 77.349,
+    "latency_p95_ms": 80.694,
+    "latency_p99_ms": 97.954,
+    "error_rate": 0.684
+  },
+  {
+    "concurrency": 25,
+    "shards": 3,
+    "total_ops": 1000,
+    "duration_s": 3.9667,
+    "throughput_ops_sec": 73.86,
+    "latency_p50_ms": 149.17,
+    "latency_p90_ms": 168.733,
+    "latency_p95_ms": 183.725,
+    "latency_p99_ms": 198.802,
+    "error_rate": 0.707
+  },
+  {
+    "concurrency": 50,
+    "shards": 3,
+    "total_ops": 1000,
+    "duration_s": 4.3033,
+    "throughput_ops_sec": 79.01,
+    "latency_p50_ms": 306.181,
+    "latency_p90_ms": 342.411,
+    "latency_p95_ms": 353.335,
+    "latency_p99_ms": 577.022,
+    "error_rate": 0.66
+  }
+]

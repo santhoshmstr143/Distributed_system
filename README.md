@@ -515,7 +515,11 @@ curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
 | **9** | ✅ Done | M6 Gate | Live range migration, catch-up, pause, epoch cutover |
 | **10** | ✅ Done | M7 Gate | Python client library and Click CLI (`docstore-cli`) |
 | **12** | ✅ Done | M7 Gate | Security hardening, static analysis, cross-system test suite |
-| **11, 13–16** | ⬜ | M7 Gate | Benchmarks, scripted demo, docs, Docker Compose, release |
+| **13** | ✅ Done | M7 Gate | Benchmarking suite, metrics runner, publication plots |
+| **14** | ⬜ | M7 Gate | Scripted end-to-end interactive demo |
+| **15** | ⬜ | M7 Gate | Final architecture & consistency documentation and report |
+| **11** | ⬜ | M7 Gate | Dockerfile and Docker Compose deployment |
+| **16** | ⬜ | M7 Gate | Final release v1.0.0 |
 
 ---
 
