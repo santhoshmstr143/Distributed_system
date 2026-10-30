@@ -191,7 +191,8 @@ class MigrationManager:
                 raise RuntimeError(
                     f"RPC to {url} failed status={resp.status_code} body={resp.text}"
                 )
-            return resp.json()
+            result_data: dict[str, Any] = resp.json()
+            return result_data
 
         pause_start: float | None = None
 

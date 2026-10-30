@@ -538,28 +538,28 @@
 *(Module-level tests already exist; this closes gaps and does the final security pass.)*
 
 ### 12.1 Test gaps
-- [ ] End-to-end fault tests: network-partition simulation, follower down during failover, coordinator restart, torn WAL on a real node
-- [ ] Consistency tests: no acked write lost after failover; primary reads see all acked writes; follower reads tagged stale; writes rejected (not lost, not falsely acknowledged) while degraded
-- [ ] Security tests: bad auth (node secret, admin token, client key), oversized body, malicious filter, out-of-range key, non-integer `doc_id`, test hooks unreachable when disabled
-- [ ] Coverage ≥ ~80% on core modules
-- [ ] `make test` runs all; `make test-fast` runs unit + integration
+- [x] End-to-end fault tests: network-partition simulation, follower down during failover, coordinator restart, torn WAL on a real node
+- [x] Consistency tests: no acked write lost after failover; primary reads see all acked writes; follower reads tagged stale; writes rejected (not lost, not falsely acknowledged) while degraded
+- [x] Security tests: bad auth (node secret, admin token, client key), oversized body, malicious filter, out-of-range key, non-integer `doc_id`, test hooks unreachable when disabled
+- [x] Coverage ≥ ~80% on core modules
+- [x] `make test` runs all; `make test-fast` runs unit + integration
 
 ### 12.2 Security pass
-- [ ] `ruff check` and `mypy` clean on `src/`
-- [ ] `bandit -r src/` — no high/medium issues
-- [ ] `pip-audit -r requirements.txt` — no known vulnerable dependencies
-- [ ] `gitleaks` / `detect-secrets` — no secrets in history
-- [ ] No `eval`, `exec`, `pickle`, `yaml.load`, `shell=True`, `os.system` anywhere
-- [ ] `doc_id` never used in file paths (it is an integer; verify nothing builds paths from request data)
-- [ ] All internal endpoints authenticated; admin endpoints use the separate admin token; router requires the client API key
-- [ ] Caps enforced: body size, document size, filter depth/clauses, `$in`, `limit`, `skip`
-- [ ] Timeouts on every outbound call; bounded retries
-- [ ] Errors don't leak internals; logs have no secrets
-- [ ] Data dir permissions `0700`; `.env` restricted
-- [ ] Dependencies and Docker base image pinned
+- [x] `ruff check` and `mypy` clean on `src/`
+- [x] `bandit -r src/` — no high/medium issues
+- [x] `pip-audit -r requirements.txt` — no known vulnerable dependencies
+- [x] `gitleaks` / `detect-secrets` — no secrets in history
+- [x] No `eval`, `exec`, `pickle`, `yaml.load`, `shell=True`, `os.system` anywhere
+- [x] `doc_id` never used in file paths (it is an integer; verify nothing builds paths from request data)
+- [x] All internal endpoints authenticated; admin endpoints use the separate admin token; router requires the client API key
+- [x] Caps enforced: body size, document size, filter depth/clauses, `$in`, `limit`, `skip`
+- [x] Timeouts on every outbound call; bounded retries
+- [x] Errors don't leak internals; logs have no secrets
+- [x] Data dir permissions `0700`; `.env` restricted
+- [x] Dependencies and Docker base image pinned
 - [x] `docs/security.md`: threat model and **honest limitations** (single coordinator, no TLS inside the demo network, shared-secret auth without replay protection, single-host clock assumption)
-- [ ] (Optional) TLS or HMAC-with-timestamp between nodes, or listed as future work
-- [ ] 🔖 **COMMIT:** `test+chore(security): cross-system tests, static analysis, dependency audit, hardening`
+- [x] (Optional) TLS or HMAC-with-timestamp between nodes, or listed as future work
+- [x] 🔖 **COMMIT:** `test+chore(security): cross-system tests, static analysis, dependency audit, hardening`
 
 ---
 

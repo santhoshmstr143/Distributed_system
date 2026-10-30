@@ -514,7 +514,8 @@ curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
 | **8** | ✅ Done | M5 Gate | Failover detection, fencing & demotion/promotion |
 | **9** | ✅ Done | M6 Gate | Live range migration, catch-up, pause, epoch cutover |
 | **10** | ✅ Done | M7 Gate | Python client library and Click CLI (`docstore-cli`) |
-| **11–16** | ⬜ | M7 Gate | Docker Compose, hardening, benchmarks, demo, release |
+| **12** | ✅ Done | M7 Gate | Security hardening, static analysis, cross-system test suite |
+| **11, 13–16** | ⬜ | M7 Gate | Benchmarks, scripted demo, docs, Docker Compose, release |
 
 ---
 

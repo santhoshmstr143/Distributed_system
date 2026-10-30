@@ -194,7 +194,7 @@ def build_coordinator_app(
                 logger.error("Background migration %s failed: %s", rec.migration_id, exc)
 
         task = asyncio.create_task(_run())
-        bg_tasks = getattr(app.state, "_bg_tasks", set())
+        bg_tasks: set[asyncio.Task[Any]] = getattr(app.state, "_bg_tasks", set())
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
         app.state._bg_tasks = bg_tasks
