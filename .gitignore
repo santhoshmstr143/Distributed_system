@@ -38,3 +38,6 @@ coverage.xml
 
 # Pre-commit cache
 .pre-commit-cache/
+
+# Archives
+*.zip
