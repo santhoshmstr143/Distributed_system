@@ -272,12 +272,20 @@ async def _execute_write(
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
-def build_app(settings: Settings, *, node_id: str, shard_id: str) -> FastAPI:
+def build_app(
+    settings: Settings,
+    *,
+    node_id: str,
+    shard_id: str,
+    ranges: list[ShardRangeConfig] | None = None,
+) -> FastAPI:
     """Factory: create and return the configured FastAPI shard-node app."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         state = NodeState(settings, node_id=node_id, shard_id=shard_id)
+        if ranges:
+            state.ranges = list(ranges)
         app.state.node = state  # per-app state, not a global
 
         node_logger = get_logger(__name__, node_id=node_id, shard_id=shard_id)

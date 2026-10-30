@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     DOC_ID_MAX: int = (2**63) - 1
     DOC_ID_MIN: int = 0
 
+    MAX_CONCURRENT_REQUESTS: int = 1_000
+    SHARD_MAP_PATH: str = "./data/shard_map.json"
+
     @model_validator(mode="after")
     def _validate_timing_constraints(self) -> Settings:
         """Enforce H < L < D and T + M < L - H at startup."""

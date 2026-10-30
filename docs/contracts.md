@@ -15,6 +15,10 @@
 - Shard ranges are **half-open `[start, end)`**; together they cover `[0, 2^63)` with
   no gaps or overlaps.
 - A document stays on its shard unless an explicit migration moves its range.
+- **Default 3-shard bootstrap partitioning:**
+  - `shard0`: `[0, 3 074 457 345 618 258 602)`
+  - `shard1`: `[3 074 457 345 618 258 602, 6 148 914 691 236 517 204)`
+  - `shard2`: `[6 148 914 691 236 517 204, 2^63)`
 - **Note:** IDs above `2^53` can lose precision in some JSON clients; our Python client is fine.
 
 ---
@@ -166,6 +170,8 @@ Synchronous replication is **never** relaxed (no single-node acknowledgements).
 | Snapshot interval | every 1 000 ops or 60 s |
 | Dedup table max entries | 100 000 |
 | Dedup TTL | 10 minutes |
+| Max concurrent router requests | 1 000 |
+| Router max retry attempts on stale map | 1 |
 
 ---
 
@@ -189,6 +195,9 @@ All errors return JSON: `{"error_code": "<CODE>", "error_message": "<human text>
 | `OUT_OF_RANGE` | 400 | `doc_id` outside this shard's owned ranges |
 | `OUTCOME_UNKNOWN` | 202 | Write appended to primary WAL but no follower ack |
 | `REPLICATION_UNAVAILABLE` | 503 | No `SYNCED` follower; write rejected before WAL append |
+| `SHARD_UNAVAILABLE` | 503 | Owning shard primary is down or timed out |
+| `SERVER_BUSY` | 503 | Router reached maximum concurrent request capacity |
+| `ROUTING_FAILED` | 500 | Router exceeded retry limit during map recovery |
 | `AUTH_FAILED` | 401 | Invalid cluster secret, admin token, or client API key |
 | `BODY_TOO_LARGE` | 413 | Request body or document exceeds size limit |
 | `VALIDATION_ERROR` | 422 | Pydantic input validation failure |
@@ -231,5 +240,6 @@ Every response includes:
 `POST /admin/migrate`, `GET /admin/status` *(admin token required)*
 
 **Router:**
-`POST /doc`, `PUT /doc/{id}`, `DELETE /doc/{id}`, `GET /doc/{id}`, `POST /query`
-*(client API key required)*
+`POST /doc`, `PUT /doc/{id}`, `DELETE /doc/{id}`, `GET /doc/{id}`, `POST /query`,
+`GET /health`, `GET /status`
+*(client API key required on document/query endpoints)*

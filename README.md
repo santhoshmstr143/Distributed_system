@@ -61,6 +61,13 @@ uvicorn "docstore.shard.app:create_default_app" --factory \
   --env-file .env
 ```
 
+## Running the router (M2 milestone)
+
+```bash
+# Start the stateless router (loads/creates static 3-shard map)
+python -m docstore.router
+```
+
 ## Development workflow
 
 ```bash
@@ -80,7 +87,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming and commit conventions.
 | 1  | ✅ Done | Contracts & common foundations |
 | 2  | ✅ Done | Storage engine (WAL, snapshots, index) |
 | 3  | ✅ Done | Basic shard node API |
-| 4  | ⬜ | Static shard map & router |
+| 4  | ✅ Done | Static shard map & router |
 | 5  | ⬜ | Query engine & scatter-gather |
 | 6  | ⬜ | Coordinator, epochs, leases |
 | 7  | ⬜ | Replication (primary → follower) |

@@ -237,33 +237,33 @@
 ## Module 4 — Static Shard Map & Basic Router  👤 Member 2 (map), Member 3 (router)
 
 ### 4.1 Shard map (static file version)
-- [ ] Shard map file: `range [start,end) → {shard_id, primary, follower, ownership_epoch}` plus global `map_version`
-- [ ] In the static stage `follower` may be `null`; every range has exactly one primary
-- [ ] Validation: contiguous, non-overlapping, full coverage of `[0, 2^63)`; reject bad maps
-- [ ] Atomic file update (temp → fsync → rename) + append-only epoch history log
-- [ ] Bootstrap config for 3 shards
-- [ ] Each shard node rejects documents outside its configured ranges
-- [ ] **Tests:** coverage/overlap/gap validation, boundary lookups, atomic update, reload
+- [x] Shard map file: `range [start,end) → {shard_id, primary, follower, ownership_epoch}` plus global `map_version`
+- [x] In the static stage `follower` may be `null`; every range has exactly one primary
+- [x] Validation: contiguous, non-overlapping, full coverage of `[0, 2^63)`; reject bad maps
+- [x] Atomic file update (temp → fsync → rename) + append-only epoch history log
+- [x] Bootstrap config for 3 shards
+- [x] Each shard node rejects documents outside its configured ranges
+- [x] **Tests:** coverage/overlap/gap validation, boundary lookups, atomic update, reload (16/16 passing)
 
 ### 4.2 Router (routing only for now)
-- [ ] Stateless FastAPI router; loads and **caches the shard map**
-- [ ] Client API: `insert`, `update`, `delete`, `get`
-- [ ] Direct routing by `doc_id` to the owning shard primary
-- [ ] Range lookup helper: which shards overlap `[start, end)`
-- [ ] Bounded retries; refresh the map once on `OutOfRange`/`StaleEpoch`; no infinite loops
-- [ ] Pass `request_id` through; retries reuse it
-- [ ] **Client API key** required on router endpoints (constant-time compare); router binds to `127.0.0.1` by default
-- [ ] Internal shard endpoints are **not** reachable through the router
-- [ ] Max concurrent requests (basic DoS protection)
-- [ ] **Tests:** docs land on the right shards, boundary keys, stale-map refresh, retry idempotency, missing/invalid API key rejected
-- [ ] 🔖 **COMMIT:** `feat(router): static shard map and shard-key routing`
+- [x] Stateless FastAPI router; loads and **caches the shard map**
+- [x] Client API: `insert`, `update`, `delete`, `get`
+- [x] Direct routing by `doc_id` to the owning shard primary
+- [x] Range lookup helper: which shards overlap `[start, end)`
+- [x] Bounded retries; refresh the map once on `OutOfRange`/`StaleEpoch`; no infinite loops
+- [x] Pass `request_id` through; retries reuse it
+- [x] **Client API key** required on router endpoints (constant-time compare); router binds to `127.0.0.1` by default
+- [x] Internal shard endpoints are **not** reachable through the router
+- [x] Max concurrent requests (basic DoS protection)
+- [x] **Tests:** docs land on the right shards, boundary keys, stale-map refresh, retry idempotency, missing/invalid API key rejected (8/8 passing)
+- [x] 🔖 **COMMIT:** `feat(router): static shard map and shard-key routing`
 
 ### ✅ M2 GATE — Minimum working system
-- [ ] 3 shard nodes + 1 router running
-- [ ] Insert 1,000 docs; verify distribution across shards
-- [ ] Get / update / delete through the router
-- [ ] Restart all nodes → data persists, routing correct
-- [ ] M2 tests green; lint clean
+- [x] 3 shard nodes + 1 router running
+- [x] Insert 1,000 docs; verify distribution across shards
+- [x] Get / update / delete through the router
+- [x] Restart all nodes → data persists, routing correct
+- [x] M2 tests green; lint clean
 
 ---
 
