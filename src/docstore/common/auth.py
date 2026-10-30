@@ -1,0 +1,153 @@
+"""
+HMAC-SHA256 authentication for inter-node RPC and admin endpoints.
+
+Design:
+- Cluster nodes authenticate each other by including an HMAC-SHA256 signature
+  of the raw request body in the ``X-Cluster-Signature`` header.
+- Admin endpoints use a separate ``X-Admin-Token`` header.
+- Client-facing router endpoints use ``X-Api-Key``.
+- All comparisons use ``hmac.compare_digest`` (constant-time) to prevent
+  timing-based side-channel attacks.
+
+Limitations (documented in docs/security.md):
+- No replay protection (timestamp not included in the HMAC).
+- Intended for a single-host Docker Compose network only.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+from typing import Annotated
+
+from fastapi import Header, HTTPException, Request
+
+from .errors import AuthError
+
+# ── Header names ──────────────────────────────────────────────────────────────
+
+CLUSTER_SIG_HEADER = "X-Cluster-Signature"
+ADMIN_TOKEN_HEADER = "X-Admin-Token"  # noqa: S105
+CLIENT_KEY_HEADER = "X-Api-Key"
+
+
+# ── Core HMAC utilities ───────────────────────────────────────────────────────
+
+
+def compute_signature(secret: str, body: bytes) -> str:
+    """Compute HMAC-SHA256 of *body* using *secret*.
+
+    Returns the lowercase hex digest.
+    """
+    return hmac.new(
+        secret.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_signature(secret: str, body: bytes, provided: str) -> bool:
+    """Return True if *provided* matches the expected HMAC of *body*.
+
+    Uses ``hmac.compare_digest`` for constant-time comparison.
+    """
+    expected = compute_signature(secret, body)
+    return hmac.compare_digest(expected.lower(), provided.lower())
+
+
+def verify_token(expected_token: str, provided_token: str) -> bool:
+    """Compare two tokens in constant time.
+
+    Uses ``hmac.compare_digest`` to prevent timing attacks.
+    """
+    return hmac.compare_digest(
+        expected_token.encode("utf-8"),
+        provided_token.encode("utf-8"),
+    )
+
+
+# ── FastAPI dependency factories ─────────────────────────────────────────────
+
+
+def make_cluster_auth_dependency(get_secret: ClusterSecretGetter) -> ClusterAuthDep:
+    """Return a FastAPI dependency that validates the cluster HMAC signature.
+
+    ``get_secret`` is a zero-argument callable returning the cluster secret string.
+    This factory pattern lets tests inject a custom secret without touching env vars.
+
+    Usage::
+
+        from docstore.common.auth import make_cluster_auth_dependency
+        from docstore.common.config import get_settings
+
+        verify_cluster = make_cluster_auth_dependency(
+            lambda: get_settings().CLUSTER_SECRET
+        )
+
+        @app.post("/internal/replicate", dependencies=[Depends(verify_cluster)])
+        async def replicate(...): ...
+    """
+
+    async def _dependency(
+        request: Request,
+        x_cluster_signature: Annotated[str, Header(alias=CLUSTER_SIG_HEADER)] = "",
+    ) -> None:
+        if not x_cluster_signature:
+            raise AuthError("Missing X-Cluster-Signature header.").to_http_exception()
+        body = await request.body()
+        secret = get_secret()
+        if not verify_signature(secret, body, x_cluster_signature):
+            raise AuthError("Invalid cluster signature.").to_http_exception()
+
+    return _dependency  # type: ignore[return-value]
+
+
+def make_admin_auth_dependency(get_token: AdminTokenGetter) -> AdminAuthDep:
+    """Return a FastAPI dependency that validates the admin token.
+
+    The admin token is compared using ``hmac.compare_digest``.
+    """
+
+    async def _dependency(
+        x_admin_token: Annotated[str, Header(alias=ADMIN_TOKEN_HEADER)] = "",
+    ) -> None:
+        if not x_admin_token:
+            raise AuthError("Missing X-Admin-Token header.").to_http_exception()
+        expected = get_token()
+        if not verify_token(expected, x_admin_token):
+            raise AuthError("Invalid admin token.").to_http_exception()
+
+    return _dependency  # type: ignore[return-value]
+
+
+def make_client_auth_dependency(get_api_key: ApiKeyGetter) -> ClientAuthDep:
+    """Return a FastAPI dependency that validates the client API key."""
+
+    async def _dependency(
+        x_api_key: Annotated[str, Header(alias=CLIENT_KEY_HEADER)] = "",
+    ) -> None:
+        if not x_api_key:
+            raise HTTPException(
+                status_code=401,
+                detail={"error_code": "AUTH_FAILED", "error_message": "Missing X-Api-Key header."},
+            )
+        expected = get_api_key()
+        if not verify_token(expected, x_api_key):
+            raise HTTPException(
+                status_code=401,
+                detail={"error_code": "AUTH_FAILED", "error_message": "Invalid API key."},
+            )
+
+    return _dependency  # type: ignore[return-value]
+
+
+# ── Type aliases (for documentation clarity) ─────────────────────────────────
+
+from collections.abc import Callable  # noqa: E402
+
+ClusterSecretGetter = Callable[[], str]
+AdminTokenGetter = Callable[[], str]
+ApiKeyGetter = Callable[[], str]
+ClusterAuthDep = Callable[..., None]
+AdminAuthDep = Callable[..., None]
+ClientAuthDep = Callable[..., None]

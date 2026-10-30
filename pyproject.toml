@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "sharded-docstore"
+version = "0.1.0"
+description = "MongoDB-inspired sharded JSON document store (distributed systems project)"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ─── Ruff ────────────────────────────────────────────────────────────────────
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "S",   # flake8-bandit (security)
+    "C4",  # flake8-comprehensions
+    "T20", # flake8-print (no stray print statements)
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "S101",  # assert is fine in tests
+    "S104",  # binding to 0.0.0.0 is intentional in some configs
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S", "T20"]  # relax security + print rules in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["docstore"]
+
+# ─── Mypy ────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_optional = true
+show_error_codes = true
+mypy_path = "src"
+exclude = ["^tests/", "^bench/", "^scripts/"]
+
+[[tool.mypy.overrides]]
+module = [
+    "sortedcontainers.*",
+]
+ignore_missing_imports = true
+
+# ─── Pytest ──────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+log_cli = true
+log_cli_level = "INFO"
+markers = [
+    "unit: fast, in-process tests with no I/O",
+    "integration: multi-component tests using real I/O",
+    "fault: fault-injection / crash tests (slow)",
+    "security: auth, input-validation and hardening tests",
+]
+addopts = "-ra -q --tb=short"
+
+# ─── Coverage ────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+source = ["src/docstore"]
+omit = ["*/tests/*", "*/bench/*"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

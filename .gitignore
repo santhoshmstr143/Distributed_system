@@ -1,0 +1,43 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+*.so
+
+# Environment
+.env
+
+# Data directories (never commit node state)
+data/
+*.wal
+*.snap
+*.log
+
+# Test / coverage artefacts
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Benchmark raw results (large; share via other means)
+results/raw/
+
+# macOS
+.DS_Store
+
+# IDE folders
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Pre-commit cache
+.pre-commit-cache/
