@@ -211,35 +211,188 @@ All errors return JSON: `{"error_code": "<CODE>", "error_message": "<human text>
   admin endpoints only. Separate from the cluster secret.
 - **Client API key** (`CLIENT_API_KEY`): sent in `X-Api-Key` header; used by the router.
 
-### Response metadata
+### Response metadata and envelopes
 
-Every response includes:
+Every response includes standard metadata (`ResponseMeta`):
 ```json
 {
-  "served_by": "<node_id>",
+  "served_by": "primary",
   "term": 1,
-  "ownership_epoch": 3,
+  "ownership_epoch": 0,
   "applied_seq": 42,
   "replication_lag": null
 }
 ```
-`replication_lag` is `null` for primary reads, non-null (ops behind) for follower reads.
+- `served_by`: `"primary"` or `"follower"` (or `<node_id>`).
+- `replication_lag`: `null` for primary reads, non-null integer (operations behind primary) for follower reads.
 
-### Endpoints (summary)
+#### Client Envelopes
 
-**Shard node — public:**
-`POST /doc`, `PUT /doc/{id}`, `DELETE /doc/{id}`, `GET /doc/{id}`,
-`POST /query`, `GET /health`, `GET /status`
+- **WriteResponse (`POST /doc`, `PUT /doc/{id}`, `DELETE /doc/{id}`):**
+  ```json
+  {
+    "outcome": "COMMITTED",
+    "request_id": "c0a80101-0000-0000-0000-000000000001",
+    "seq": 42,
+    "meta": {
+      "served_by": "primary",
+      "term": 1,
+      "ownership_epoch": 0,
+      "applied_seq": 42,
+      "replication_lag": null
+    },
+    "error_code": null,
+    "error_message": null
+  }
+  ```
+  `outcome` is strictly one of: `"COMMITTED"`, `"REJECTED"`, or `"outcome_unknown"`.
 
-**Shard node — internal (`/internal/*`):**
-`POST /internal/replicate`, `POST /internal/catchup`, `GET /internal/snapshot`,
-`POST /internal/snapshot/apply`, `POST /internal/fence`
+- **ReadResponse (`GET /doc/{id}`):**
+  ```json
+  {
+    "document": {
+      "doc_id": 100,
+      "title": "Document Title",
+      "tags": ["example"]
+    },
+    "meta": {
+      "served_by": "primary",
+      "term": 1,
+      "ownership_epoch": 0,
+      "applied_seq": 42,
+      "replication_lag": null
+    }
+  }
+  ```
 
-**Coordinator:**
-`GET /shardmap`, `POST /register`, `POST /heartbeat`,
-`POST /admin/migrate`, `GET /admin/status` *(admin token required)*
+- **QueryResponse (`POST /query`):**
+  ```json
+  {
+    "documents": [
+      { "doc_id": 100, "title": "First" },
+      { "doc_id": 250, "title": "Second" }
+    ],
+    "total": 2,
+    "meta": {
+      "served_by": "primary",
+      "term": 1,
+      "ownership_epoch": 0,
+      "applied_seq": 42,
+      "replication_lag": null
+    }
+  }
+  ```
 
-**Router:**
-`POST /doc`, `PUT /doc/{id}`, `DELETE /doc/{id}`, `GET /doc/{id}`, `POST /query`,
-`GET /health`, `GET /status`
-*(client API key required on document/query endpoints)*
+---
+
+## 10. Shard Node Internal RPCs (`/internal/*`)
+
+All internal RPCs require cluster secret authentication (`X-Cluster-Signature` HMAC-SHA256).
+
+### 10.1 `POST /internal/replicate`
+Sent from primary to follower for synchronous replication before acknowledging writes.
+- **Request:**
+  ```json
+  {
+    "shard_id": "shard0",
+    "term": 1,
+    "seq": 42,
+    "op": "insert",
+    "doc_id": 100,
+    "request_id": "c0a80101-0000-0000-0000-000000000001",
+    "payload": { "doc_id": 100, "title": "Example" }
+  }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "status": "ok",
+    "seq": 42,
+    "last_seq": 42,
+    "error_message": null
+  }
+  ```
+- **Error Responses:**
+  - `status: "stale_term"`: Follower has higher term.
+  - `status: "gap"`: Follower detects missing sequence numbers; requests catchup.
+
+### 10.2 `POST /internal/catchup`
+Follower requests missing log entries from primary during recovery.
+- **Request:**
+  ```json
+  {
+    "shard_id": "shard0",
+    "after_seq": 40
+  }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "entries": [ ... ],
+    "needs_snapshot": false,
+    "last_seq": 50
+  }
+  ```
+  If primary has compacted the WAL past `after_seq`, `needs_snapshot: true`.
+
+### 10.3 `GET /internal/snapshot` and `POST /internal/snapshot/apply`
+Used when WAL catchup is insufficient.
+- `GET /internal/snapshot`: Exports atomic snapshot including documents, term, epoch, applied seq, and dedup table.
+- `POST /internal/snapshot/apply`: Replaces follower's storage engine state atomically.
+
+### 10.4 `POST /internal/fence`
+Signals node of demotion or epoch/term invalidation during failover.
+
+---
+
+## 11. Coordinator Endpoints
+
+### 11.1 `GET /shardmap`
+Public endpoint returning current cluster topology and `map_version`.
+```json
+{
+  "map_version": 1,
+  "entries": [
+    {
+      "shard_id": "shard0",
+      "range": { "start": 0, "end": 3074457345618258602 },
+      "primary": "shard0-primary:8000",
+      "follower": "shard0-follower:8100",
+      "ownership_epoch": 0,
+      "map_version": 1
+    }
+  ]
+}
+```
+
+### 11.2 `POST /register`
+Nodes register on startup with cluster secret:
+```json
+{
+  "node_id": "shard0-p",
+  "shard_id": "shard0",
+  "address": "shard0-primary:8000",
+  "requested_role": "primary"
+}
+```
+Response assigns role, initial term, key ranges, and initial lease grant (if primary).
+
+### 11.3 `POST /heartbeat`
+Primary sends heartbeat every `H` seconds with monotonic timestamp and replica status:
+```json
+{
+  "node_id": "shard0-p",
+  "shard_id": "shard0",
+  "role": "primary",
+  "term": 1,
+  "last_applied_seq": 42,
+  "follower_acked_seq": 42,
+  "follower_state": "SYNCED",
+  "timestamp_monotonic": 1234.56
+}
+```
+Coordinator responds with `LeaseGrant` if valid.
+
+### 11.4 `GET /admin/status`
+Protected by `X-Admin-Token`. Returns health of all nodes, active leases, map version, and degraded shards.
+

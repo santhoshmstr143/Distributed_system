@@ -557,7 +557,7 @@
 - [ ] Errors don't leak internals; logs have no secrets
 - [ ] Data dir permissions `0700`; `.env` restricted
 - [ ] Dependencies and Docker base image pinned
-- [ ] `docs/security.md`: threat model and **honest limitations** (single coordinator, no TLS inside the demo network, shared-secret auth without replay protection, single-host clock assumption)
+- [x] `docs/security.md`: threat model and **honest limitations** (single coordinator, no TLS inside the demo network, shared-secret auth without replay protection, single-host clock assumption)
 - [ ] (Optional) TLS or HMAC-with-timestamp between nodes, or listed as future work
 - [ ] 🔖 **COMMIT:** `test+chore(security): cross-system tests, static analysis, dependency audit, hardening`
 
@@ -599,11 +599,11 @@
 
 ## Module 15 — Documentation & Final Report  👤 All
 
-- [ ] `README.md`: overview, architecture diagram, quickstart, CLI examples, how to run tests / bench / demo
-- [ ] `docs/architecture.md`: components, data path, control path, shard map format, WAL format
-- [ ] `docs/consistency.md`: write path, **commit point**, outcome model (committed / rejected / unknown), primary vs follower reads, lease/epoch/term fencing argument (why the follower's term check, not the lease, protects acknowledged writes), `(term, seq)` log matching, **degraded mode** and the alternatives considered (relaxed durability, a third replica) with why they were not chosen. Distinguish **durability, replication, consistency, availability**
-- [ ] `docs/failover.md` and `docs/migration.md`: state machines, commit point, failure cases
-- [ ] `docs/api.md`: endpoints, examples, error codes
+- [x] `README.md`: overview, architecture diagram, quickstart, CLI examples, how to run tests / bench / demo
+- [x] `docs/architecture.md`: components, data path, control path, shard map format, WAL format
+- [x] `docs/consistency.md`: write path, **commit point**, outcome model (committed / rejected / unknown), primary vs follower reads, lease/epoch/term fencing argument (why the follower's term check, not the lease, protects acknowledged writes), `(term, seq)` log matching, **degraded mode** and the alternatives considered (relaxed durability, a third replica) with why they were not chosen. Distinguish **durability, replication, consistency, availability**
+- [x] `docs/failover.md` and `docs/migration.md`: state machines, commit point, failure cases
+- [x] `docs/api.md`: endpoints, examples, error codes
 - [ ] Final LaTeX report covers: sequence numbers and replication; write-acknowledgement protocol; lease expiry and ownership fencing; snapshot consistency and oplog catch-up in migration; failure scenarios and recovery behaviour; evaluation with plots; **limitations (two-replica deployment means writes are unavailable after a primary failure until the old primary rejoins; single coordinator — do not claim full fault tolerance)**; future work
 - [ ] Docstrings on public functions; type hints throughout
 - [ ] Report numbers match saved `results/` files
