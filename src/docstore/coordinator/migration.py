@@ -526,7 +526,13 @@ class MigrationManager:
 
                     recovery_errors: list[str] = []
 
-                    if dest_entry and dest_entry.primary:
+                    if not dest_entry or not dest_entry.primary:
+                        err = (
+                            f"Destination shard {rec.to_shard} primary entry missing from shard map"
+                        )
+                        logger.warning("%s", err)
+                        recovery_errors.append(err)
+                    else:
                         try:
                             await _rpc(
                                 f"{dest_entry.primary}/internal/migration/cutover",
@@ -558,7 +564,11 @@ class MigrationManager:
                             logger.warning("%s", err)
                             recovery_errors.append(err)
 
-                    if src_entry and src_entry.primary:
+                    if not src_entry or not src_entry.primary:
+                        err = f"Source shard {rec.from_shard} primary entry missing from shard map"
+                        logger.warning("%s", err)
+                        recovery_errors.append(err)
+                    else:
                         try:
                             await _rpc(
                                 f"{src_entry.primary}/internal/migration/cleanup",
@@ -593,7 +603,11 @@ class MigrationManager:
                     logger.info("Migration %s is before cutover; safely aborting", rec.migration_id)
                     abort_errors: list[str] = []
 
-                    if src_entry and src_entry.primary:
+                    if not src_entry or not src_entry.primary:
+                        err = f"Source shard {rec.from_shard} primary entry missing from shard map"
+                        logger.warning("%s", err)
+                        abort_errors.append(err)
+                    else:
                         try:
                             await _rpc(
                                 f"{src_entry.primary}/internal/migration/unpause",
@@ -604,7 +618,13 @@ class MigrationManager:
                             logger.warning("%s", err)
                             abort_errors.append(err)
 
-                    if dest_entry and dest_entry.primary:
+                    if not dest_entry or not dest_entry.primary:
+                        err = (
+                            f"Destination shard {rec.to_shard} primary entry missing from shard map"
+                        )
+                        logger.warning("%s", err)
+                        abort_errors.append(err)
+                    else:
                         try:
                             await _rpc(
                                 f"{dest_entry.primary}/internal/migration/abort",

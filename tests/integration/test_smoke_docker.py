@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import httpx
 import pytest
@@ -22,11 +23,19 @@ def test_docker_cluster_smoke() -> None:
 
     try:
         with httpx.Client(base_url=router_url, timeout=5.0) as client:
-            resp = client.get("/health")
-            if resp.status_code != 200:
-                pytest.skip(
-                    f"Live cluster router at {router_url} not healthy (HTTP {resp.status_code})"
-                )
+            healthy = False
+            for _ in range(10):
+                try:
+                    resp = client.get("/health")
+                    if resp.status_code == 200:
+                        healthy = True
+                        break
+                except (httpx.ConnectError, httpx.ReadError):
+                    pass
+                time.sleep(0.5)
+
+            if not healthy:
+                pytest.skip(f"Live cluster router at {router_url} not healthy")
 
             # 1. Insert test document
             req_id = "smoke-test-req-001"

@@ -38,6 +38,7 @@ class DedupEntry:
     seq: int
     outcome: str
     result: dict[str, Any]
+    term: int = 1
     created_at: float = field(default_factory=time.monotonic)
 
 
@@ -235,6 +236,7 @@ class StorageEngine:
                 "seq": e.seq,
                 "outcome": e.outcome,
                 "result": e.result,
+                "term": e.term,
                 "created_at": e.created_at,
             }
             for rid, e in self._dedup.items()
@@ -249,6 +251,7 @@ class StorageEngine:
                 seq=v["seq"],
                 outcome=v["outcome"],
                 result=v["result"],
+                term=v.get("term", 1),
                 created_at=v.get("created_at", now),
             )
             # Skip entries older than TTL

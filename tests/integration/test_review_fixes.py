@@ -20,7 +20,9 @@ Regression tests for review findings:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -30,11 +32,18 @@ from httpx import ASGITransport, AsyncClient
 
 from docstore.common.auth import CLIENT_KEY_HEADER, CLUSTER_SIG_HEADER, compute_signature
 from docstore.common.config import Settings
-from docstore.common.models import NodeRole, QueryFilter, ReplicaState
+from docstore.common.models import (
+    NodeRole,
+    QueryFilter,
+    ReplicaState,
+    ShardMapEntry,
+    ShardRange,
+    WriteOutcome,
+)
 from docstore.coordinator.coordinator import CoordinatorService
 from docstore.coordinator.migration import MigrationManager, MigrationState
 from docstore.router.scatter import execute_scatter_query
-from docstore.router.shard_map import ShardMapManager, create_default_3_shard_map
+from docstore.router.shard_map import ShardMap, ShardMapManager, create_default_3_shard_map
 from docstore.shard.app import ShardRangeConfig, build_app, resync_with_primary
 
 pytestmark = pytest.mark.integration
@@ -867,3 +876,1458 @@ async def test_issue6_scatter_gather_large_pagination(tmp_path: Path):
     assert len(queries_made) >= 2
     assert queries_made[0]["limit"] == 1000
     assert queries_made[1]["limit"] == 200
+
+
+# ── Regression Tests for Focused Correctness Review ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wal_restart_uncommitted_entry_discarded_and_sequence_consistent(tmp_path: Path):
+    """Requirements 1-5:
+    1. Primary has a durable uncommitted WAL entry.
+    2. The operation is resolved as uncommitted.
+    3. Primary restarts.
+    4. Verify the operation does not reappear in the engine.
+    5. Verify the sequence number and WAL remain consistent.
+    """
+    settings = _make_settings(tmp_path)
+    shard_id = "shard0"
+
+    # Start primary and execute committed write (seq=1)
+    app1 = build_app(settings=settings, node_id="p1", shard_id=shard_id, role=NodeRole.PRIMARY)
+    async with LifespanManager(app1):
+        transport1 = ASGITransport(app=app1)
+        async with AsyncClient(transport=transport1, base_url="http://p1") as c1:
+            p_state = app1.state.node
+            p_state.ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
+
+            r1 = await c1.post(
+                "/doc",
+                json={"request_id": "req-1", "document": {"doc_id": 10, "val": "v1"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r1.status_code in (200, 201)
+            assert p_state.committed_seq == 1
+            assert p_state.engine.last_applied_seq == 1
+            assert p_state.wal.last_seq == 1
+
+            # Append uncommitted operation to primary WAL (seq=2)
+            seq2 = p_state.wal.next_seq()
+            assert seq2 == 2
+            p_state.wal.append(
+                seq=seq2,
+                term=p_state.term,
+                op="insert",
+                doc_id=20,
+                request_id="req-2",
+                payload={"doc_id": 20, "val": "uncommitted"},
+            )
+            assert p_state.wal.last_seq == 2
+            p_state.pending_unresolved_writes["req-2"] = {
+                "seq": 2,
+                "term": p_state.term,
+                "op": "insert",
+                "doc_id": 20,
+                "payload": {"doc_id": 20, "val": "uncommitted"},
+            }
+
+            # Follower responds indicating authoritative absence (wal_last_seq >= 2 and not has_op)
+            async def mock_follower(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "ok",
+                        "has_op": False,
+                        "term": 1,
+                        "wal_last_seq": 5,
+                        "entry_found": False,
+                    },
+                )
+
+            p_state.follower_url = "follower"
+            p_state.follower_state = ReplicaState.DOWN
+            p_state.http_client = AsyncClient(transport=httpx.MockTransport(mock_follower))
+
+            # Trigger reconciliation by retrying req-2
+            await c1.post(
+                "/doc",
+                json={"request_id": "req-2", "document": {"doc_id": 20, "val": "uncommitted"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            # Authoritative absence resolved as uncommitted: pending entry removed and tail truncated
+            assert "req-2" not in p_state.pending_unresolved_writes
+            assert p_state.wal.last_seq == 1
+            assert p_state.committed_seq == 1
+
+    # Simulate restart of primary node
+    app2 = build_app(settings=settings, node_id="p1", shard_id=shard_id, role=NodeRole.PRIMARY)
+    async with LifespanManager(app2):
+        state2 = app2.state.node
+        # Verify uncommitted entry (doc 20) did NOT reappear in engine
+        assert state2.engine.get(10) is not None
+        assert state2.engine.get(20) is None
+        assert state2.engine.last_applied_seq == 1
+        assert state2.wal.last_seq == 1
+        assert state2.committed_seq == 1
+
+        # Promote to primary to continue serving writes
+        transport2 = ASGITransport(app=app2)
+        async with AsyncClient(transport=transport2, base_url="http://p2") as c2:
+            prom_bytes = json.dumps({"term": 2}).encode("utf-8")
+            await c2.post(
+                "/internal/promote",
+                content=prom_bytes,
+                headers=_cluster_headers(prom_bytes),
+            )
+
+            # Next write must use sequence number 2 (strictly contiguous, no sequence gaps)
+            r3 = await c2.post(
+                "/doc",
+                json={"request_id": "req-3", "document": {"doc_id": 30, "val": "v3"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r3.status_code in (200, 201)
+            assert r3.json()["seq"] == 2
+            assert state2.wal.last_seq == 2
+            assert state2.engine.last_applied_seq == 2
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_follower_has_op_lost_ack(tmp_path: Path):
+    """Requirement 6: Follower durably stores an operation but its acknowledgement is lost.
+    Reconciles as COMMITTED and prevents duplicate execution on retry.
+    """
+    p_settings = _make_settings(tmp_path / "primary")
+    f_settings = _make_settings(tmp_path / "follower")
+    primary_app = build_app(
+        settings=p_settings, node_id="p1", shard_id="shard0", role=NodeRole.PRIMARY
+    )
+    follower_app = build_app(
+        settings=f_settings, node_id="f1", shard_id="shard0", role=NodeRole.FOLLOWER
+    )
+
+    async with LifespanManager(follower_app), LifespanManager(primary_app):
+        p_state = primary_app.state.node
+        f_state = follower_app.state.node
+        p_state.ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
+        f_state.ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
+
+        # Follower durably stored the op at seq 1, term 1
+        f_state.wal.append(
+            seq=1,
+            term=1,
+            op="insert",
+            doc_id=50,
+            request_id="req-ack-lost",
+            payload={"doc_id": 50, "v": "lost_ack"},
+        )
+        f_state.engine.apply(
+            {
+                "seq": 1,
+                "term": 1,
+                "op": "insert",
+                "doc_id": 50,
+                "request_id": "req-ack-lost",
+                "payload": {"doc_id": 50, "v": "lost_ack"},
+            }
+        )
+        f_state.committed_seq = 1
+
+        # Primary has pending write at seq 1 whose ack was lost
+        p_state.pending_unresolved_writes["req-ack-lost"] = {
+            "seq": 1,
+            "term": 1,
+            "op": "insert",
+            "doc_id": 50,
+            "payload": {"doc_id": 50, "v": "lost_ack"},
+        }
+        p_state.wal.append(
+            seq=1,
+            term=1,
+            op="insert",
+            doc_id=50,
+            request_id="req-ack-lost",
+            payload={"doc_id": 50, "v": "lost_ack"},
+        )
+        p_state.follower_state = ReplicaState.DOWN
+
+        f_transport = ASGITransport(app=follower_app)
+        async with AsyncClient(transport=f_transport, base_url="http://follower") as f_client:
+            p_state.follower_url = "follower"
+            p_state.http_client = f_client
+
+            p_transport = ASGITransport(app=primary_app)
+            async with AsyncClient(transport=p_transport, base_url="http://primary") as p_client:
+                # Retry triggers reconciliation
+                resp = await p_client.post(
+                    "/doc",
+                    json={
+                        "request_id": "req-ack-lost",
+                        "document": {"doc_id": 50, "v": "lost_ack"},
+                    },
+                    headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+                )
+                assert resp.status_code in (200, 201)
+                data = resp.json()
+                assert data["outcome"] in ("committed", "COMMITTED")
+                assert data["seq"] == 1
+                assert p_state.committed_seq == 1
+                assert "req-ack-lost" not in p_state.pending_unresolved_writes
+
+                # Second retry returns COMMITTED without executing twice
+                retry_resp = await p_client.post(
+                    "/doc",
+                    json={
+                        "request_id": "req-ack-lost",
+                        "document": {"doc_id": 50, "v": "lost_ack"},
+                    },
+                    headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+                )
+                assert retry_resp.status_code in (200, 201)
+                assert retry_resp.json()["outcome"] in ("committed", "COMMITTED")
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_follower_behind_and_unavailable_blocks_writes(tmp_path: Path):
+    """Requirements 7, 8, 13:
+    7. Follower is behind: retains OUTCOME_UNKNOWN.
+    8. Follower is unavailable: retains OUTCOME_UNKNOWN.
+    13. An unresolved operation continues blocking subsequent writes.
+    """
+    settings = _make_settings(tmp_path)
+    primary_app = build_app(
+        settings=settings, node_id="p1", shard_id="shard0", role=NodeRole.PRIMARY
+    )
+
+    async with LifespanManager(primary_app):
+        p_state = primary_app.state.node
+        p_state.ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
+        p_state.committed_seq = 1
+
+        # Pending write at seq 5
+        p_state.pending_unresolved_writes["req-lag"] = {
+            "seq": 5,
+            "term": 1,
+            "op": "insert",
+            "doc_id": 100,
+            "payload": {"doc_id": 100},
+        }
+
+        # Case 1: Follower is behind (wal_last_seq=2 < seq=5)
+        async def lagging_follower(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "has_op": False,
+                    "term": 1,
+                    "wal_last_seq": 2,
+                    "entry_found": False,
+                },
+            )
+
+        p_state.follower_url = "follower"
+        p_state.follower_state = ReplicaState.DOWN
+        p_state.http_client = AsyncClient(transport=httpx.MockTransport(lagging_follower))
+
+        p_transport = ASGITransport(app=primary_app)
+        async with AsyncClient(transport=p_transport, base_url="http://primary") as p_client:
+            # Reconcile attempt on lagging follower
+            r_lag = await p_client.post(
+                "/doc",
+                json={"request_id": "req-lag", "document": {"doc_id": 100}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r_lag.status_code == 202
+            assert "req-lag" in p_state.pending_unresolved_writes
+
+            # Subsequent write is blocked by unresolved write
+            r_blocked = await p_client.post(
+                "/doc",
+                json={"request_id": "req-subsequent", "document": {"doc_id": 101}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r_blocked.status_code == 503
+            assert "Cannot accept subsequent writes" in str(r_blocked.json())
+
+        # Case 2: Follower unavailable (connection error / 500)
+        async def unavailable_follower(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={"error": "Follower unreachable"})
+
+        p_state.http_client = AsyncClient(transport=httpx.MockTransport(unavailable_follower))
+        async with AsyncClient(transport=p_transport, base_url="http://primary") as p_client:
+            r_unavail = await p_client.post(
+                "/doc",
+                json={"request_id": "req-lag", "document": {"doc_id": 100}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r_unavail.status_code == 202
+            assert "req-lag" in p_state.pending_unresolved_writes
+
+            # Writes remain blocked
+            r_blocked2 = await p_client.post(
+                "/doc",
+                json={"request_id": "req-subsequent2", "document": {"doc_id": 102}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r_blocked2.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_follower_promoted_higher_term_and_missing_from_later_log(
+    tmp_path: Path,
+):
+    """Requirements 9, 10, 12:
+    9. Follower is promoted under a higher term.
+    10. A previously committed operation is missing from a later log: must NOT be discarded.
+    12. An uncommitted tail is safely discarded.
+    """
+    settings = _make_settings(tmp_path)
+    primary_app = build_app(
+        settings=settings, node_id="p1", shard_id="shard0", role=NodeRole.PRIMARY
+    )
+
+    async with LifespanManager(primary_app):
+        p_state = primary_app.state.node
+        p_state.ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
+        p_state.term = 5
+        p_state.committed_seq = 9
+
+        # Case 1: Primary appended (term=5, seq=10). Follower B durably stored it, then B was promoted to term 6.
+        # Ack was lost. Primary reconciles with B.
+        p_state.pending_unresolved_writes["req-committed-survives"] = {
+            "seq": 10,
+            "term": 5,
+            "op": "insert",
+            "doc_id": 200,
+            "payload": {"doc_id": 200},
+        }
+
+        # Follower B is now at term 6, but has op (term=5, seq=10, req="req-committed-survives")
+        async def promoted_follower_with_op(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "has_op": True,
+                    "term": 6,
+                    "wal_last_seq": 12,
+                    "op_term": 5,
+                    "op_request_id": "req-committed-survives",
+                    "entry_found": True,
+                },
+            )
+
+        p_state.follower_url = "follower"
+        p_state.follower_state = ReplicaState.DOWN
+        p_state.http_client = AsyncClient(transport=httpx.MockTransport(promoted_follower_with_op))
+
+        p_transport = ASGITransport(app=primary_app)
+        async with AsyncClient(transport=p_transport, base_url="http://primary") as p_client:
+            resp = await p_client.post(
+                "/doc",
+                json={"request_id": "req-committed-survives", "document": {"doc_id": 200}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert resp.status_code in (200, 201)
+            assert resp.json()["outcome"] in ("committed", "COMMITTED")
+            assert "req-committed-survives" not in p_state.pending_unresolved_writes
+            assert p_state.committed_seq == 10
+
+        # Case 2: Now primary has an uncommitted proposal (term=5, seq=11).
+        # Follower B was promoted to term 6 and its log has progressed past seq 11 without this op.
+        p_state.wal.append(
+            seq=11,
+            term=5,
+            op="insert",
+            doc_id=201,
+            request_id="req-uncommitted-tail",
+            payload={"doc_id": 201},
+        )
+        assert p_state.wal.last_seq == 11
+        p_state.pending_unresolved_writes["req-uncommitted-tail"] = {
+            "seq": 11,
+            "term": 5,
+            "op": "insert",
+            "doc_id": 201,
+            "payload": {"doc_id": 201},
+        }
+
+        async def promoted_follower_without_op(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "has_op": False,
+                    "term": 6,
+                    "wal_last_seq": 15,
+                    "op_term": None,
+                    "op_request_id": None,
+                    "entry_found": False,
+                },
+            )
+
+        p_state.http_client = AsyncClient(
+            transport=httpx.MockTransport(promoted_follower_without_op)
+        )
+        async with AsyncClient(transport=p_transport, base_url="http://primary") as p_client:
+            resp2 = await p_client.post(
+                "/doc",
+                json={"request_id": "req-uncommitted-tail", "document": {"doc_id": 201}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert resp2.status_code in (202, 503)
+            # Uncommitted tail was safely discarded down to committed_seq (10)
+            assert p_state.wal.last_seq == 10
+            assert "req-uncommitted-tail" not in p_state.pending_unresolved_writes
+
+
+@pytest.mark.asyncio
+async def test_check_op_incomplete_or_invalid_identity_rejected(tmp_path: Path):
+    """Requirement 11: A matching operation has incomplete or invalid identity fields.
+    /internal/check-op must reject incomplete identity and reconciliation must retain OUTCOME_UNKNOWN.
+    """
+    settings = _make_settings(tmp_path)
+    follower_app = build_app(
+        settings=settings, node_id="f1", shard_id="shard0", role=NodeRole.FOLLOWER
+    )
+
+    async with LifespanManager(follower_app):
+        f_state = follower_app.state.node
+        f_state.wal.append(
+            seq=5,
+            term=2,
+            op="insert",
+            doc_id=50,
+            request_id="req-ident",
+            payload={"doc_id": 50},
+        )
+
+        transport = ASGITransport(app=follower_app)
+        async with AsyncClient(transport=transport, base_url="http://follower") as client:
+
+            async def _check(body_dict: dict) -> httpx.Response:
+                b = json.dumps(body_dict).encode("utf-8")
+                return await client.post(
+                    "/internal/check-op", content=b, headers=_cluster_headers(b)
+                )
+
+            # 1. Missing seq
+            r1 = await _check({"term": 2, "request_id": "req-ident"})
+            assert r1.status_code == 200
+            assert r1.json()["status"] == "invalid_identity"
+            assert r1.json()["has_op"] is False
+
+            # 2. Missing term
+            r2 = await _check({"seq": 5, "request_id": "req-ident"})
+            assert r2.status_code == 200
+            assert r2.json()["status"] == "invalid_identity"
+            assert r2.json()["has_op"] is False
+
+            # 3. Missing request_id
+            r3 = await _check({"seq": 5, "term": 2})
+            assert r3.status_code == 200
+            assert r3.json()["status"] == "invalid_identity"
+            assert r3.json()["has_op"] is False
+
+            # 4. Mismatching term
+            r4 = await _check({"seq": 5, "term": 1, "request_id": "req-ident"})
+            assert r4.status_code == 200
+            assert r4.json()["has_op"] is False
+
+            # 5. Mismatching request_id
+            r5 = await _check({"seq": 5, "term": 2, "request_id": "req-other"})
+            assert r5.status_code == 200
+            assert r5.json()["has_op"] is False
+
+            # 6. Complete matching identity
+            r6 = await _check({"seq": 5, "term": 2, "request_id": "req-ident"})
+            assert r6.status_code == 200
+            assert r6.json()["status"] == "ok"
+            assert r6.json()["has_op"] is True
+
+
+@pytest.mark.asyncio
+async def test_promotion_truncates_uncommitted_tail_and_preserves_committed(tmp_path: Path):
+    """Requirements 14-16:
+    14. New primary contains a committed WAL prefix and an uncommitted tail.
+    15. Verify committed operations survive promotion.
+    16. Verify uncommitted operations are not applied.
+    """
+    settings = _make_settings(tmp_path)
+    shard_id = "shard0"
+
+    app = build_app(
+        settings=settings, node_id="node-promote", shard_id=shard_id, role=NodeRole.FOLLOWER
+    )
+    async with LifespanManager(app):
+        state = app.state.node
+        state.ranges = [ShardRangeConfig(start=0, end=1000, ownership_epoch=1)]
+
+        # Committed prefix: seq=1 (committed_seq=1)
+        state.wal.append(
+            seq=1,
+            term=1,
+            op="insert",
+            doc_id=10,
+            request_id="req-comm",
+            payload={"doc_id": 10, "val": "committed"},
+        )
+        state.committed_seq = 1
+
+        # Uncommitted tail: seq=2, seq=3 (committed_seq remains 1)
+        state.wal.append(
+            seq=2,
+            term=1,
+            op="insert",
+            doc_id=20,
+            request_id="req-uncomm-1",
+            payload={"doc_id": 20, "val": "uncommitted"},
+        )
+        state.wal.append(
+            seq=3,
+            term=1,
+            op="insert",
+            doc_id=30,
+            request_id="req-uncomm-2",
+            payload={"doc_id": 30, "val": "uncommitted"},
+        )
+        assert state.wal.last_seq == 3
+
+        # Promote node to PRIMARY in term 2
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://node") as client:
+            prom_bytes = json.dumps({"term": 2}).encode("utf-8")
+            p_resp = await client.post(
+                "/internal/promote",
+                content=prom_bytes,
+                headers=_cluster_headers(prom_bytes),
+            )
+            assert p_resp.status_code == 200
+            assert state.role == NodeRole.PRIMARY
+            assert state.term == 2
+
+            # 15. Committed operation survived promotion and applied to engine
+            assert state.engine.get(10) is not None
+            assert state.engine.last_applied_seq == 1
+
+            # 16. Uncommitted operations were NOT applied and discarded
+            assert state.engine.get(20) is None
+            assert state.engine.get(30) is None
+            assert state.wal.last_seq == 1
+
+            # New write gets seq=2
+            w_resp = await client.post(
+                "/doc",
+                json={"request_id": "req-new", "document": {"doc_id": 40, "val": "v4"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert w_resp.status_code in (200, 201)
+            assert w_resp.json()["seq"] == 2
+            assert state.wal.last_seq == 2
+
+
+@pytest.mark.asyncio
+async def test_migration_missing_shard_entries_post_cutover_and_pre_cutover(tmp_path: Path):
+    """Requirements 17-22:
+    17. Destination shard entry is missing during post-cutover recovery.
+    18. Source shard entry is missing during post-cutover cleanup.
+    19. Source shard entry is missing during pre-cutover abort.
+    20. Destination shard entry is missing during pre-cutover abort.
+    21. Verify none of these cases falsely marks a migration DONE or ABORTED.
+    22. Verify recovery succeeds after the missing shard becomes available.
+    """
+    settings = _make_settings(tmp_path)
+    map_path = tmp_path / "shard_map.json"
+    map_mgr = ShardMapManager(map_path)
+
+    # Start with full map to create valid migration records
+    full_map = create_default_3_shard_map()
+    map_mgr.save(full_map)
+
+    coord_svc = CoordinatorService(settings, shard_map_path=map_path)
+    for s_id in ("shard0", "shard1", "shard2"):
+        coord_svc.replica_states[s_id] = ReplicaState.SYNCED
+
+    mgr = coord_svc.migration_mgr
+
+    # 17. Destination shard missing in post-cutover recovery (from shard0 to shard1)
+    rec17 = mgr.create_migration(
+        from_shard="shard0", to_shard="shard1", start=0, end=500, coord=coord_svc
+    )
+    rec17.state = MigrationState.CUTOVER
+    rec17.final_cutover_epoch = 10
+    mgr.save_record(rec17)
+
+    # 18. Source shard missing in post-cutover cleanup (from shard1 to shard0)
+    rec18 = mgr.create_migration(
+        from_shard="shard1",
+        to_shard="shard0",
+        start=3500000000000000000,
+        end=4000000000000000000,
+        coord=coord_svc,
+    )
+    rec18.state = MigrationState.CLEANUP
+    rec18.final_cutover_epoch = 11
+    mgr.save_record(rec18)
+
+    # 19. Source shard missing in pre-cutover abort (from shard2 to shard0)
+    rec19 = mgr.create_migration(
+        from_shard="shard2",
+        to_shard="shard0",
+        start=6500000000000000000,
+        end=7000000000000000000,
+        coord=coord_svc,
+    )
+    rec19.state = MigrationState.PAUSE
+    mgr.save_record(rec19)
+
+    # 20. Destination shard missing in pre-cutover abort (from shard0 to shard2)
+    rec20 = mgr.create_migration(
+        from_shard="shard0", to_shard="shard2", start=500, end=1000, coord=coord_svc
+    )
+    rec20.state = MigrationState.CATCHUP
+    mgr.save_record(rec20)
+
+    # Now switch shard map to partial_map (missing shard1 and shard2) to simulate missing shard entries
+    partial_map = ShardMap(
+        map_version=1,
+        entries=[
+            ShardMapEntry(
+                shard_id="shard0",
+                range=ShardRange(start=0, end=9223372036854775808),
+                primary="http://shard0-primary:8000",
+                follower="http://shard0-follower:8000",
+                ownership_epoch=1,
+                map_version=1,
+            )
+        ],
+    )
+    map_mgr.save(partial_map)
+    coord_svc.map_mgr.reload()
+
+    # Resume unfinished migrations with missing shard entries in shard map
+    recovered = await coord_svc.resume_unfinished_migrations()
+
+    # 21. Verify NONE of these 4 cases falsely marked DONE or ABORTED
+    assert len(recovered) == 0
+
+    saved17 = coord_svc.migration_mgr.migrations[rec17.migration_id]
+    assert saved17.state != MigrationState.DONE
+    assert saved17.state == MigrationState.CLEANUP
+    assert "Destination shard shard1 primary entry missing" in str(saved17.error)
+
+    saved18 = coord_svc.migration_mgr.migrations[rec18.migration_id]
+    assert saved18.state != MigrationState.DONE
+    assert saved18.state == MigrationState.CLEANUP
+    assert "Source shard shard1 primary entry missing" in str(saved18.error)
+
+    saved19 = coord_svc.migration_mgr.migrations[rec19.migration_id]
+    assert saved19.state != MigrationState.ABORTED
+    assert saved19.state == MigrationState.PAUSE
+    assert "Source shard shard2 primary entry missing" in str(saved19.error)
+
+    saved20 = coord_svc.migration_mgr.migrations[rec20.migration_id]
+    assert saved20.state != MigrationState.ABORTED
+    assert saved20.state == MigrationState.CATCHUP
+    assert "Destination shard shard2 primary entry missing" in str(saved20.error)
+
+    # 22. Verify recovery succeeds after missing shards become available
+    full_map = create_default_3_shard_map()
+    map_mgr.save(full_map)
+    coord_svc.map_mgr.reload()
+
+    async def mock_rpc_ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok"})
+
+    ok_client = AsyncClient(transport=httpx.MockTransport(mock_rpc_ok))
+    recovered_now = await coord_svc.resume_unfinished_migrations(http_client=ok_client)
+    assert len(recovered_now) == 4
+
+    assert coord_svc.migration_mgr.migrations[rec17.migration_id].state == MigrationState.DONE
+    assert coord_svc.migration_mgr.migrations[rec18.migration_id].state == MigrationState.DONE
+    assert coord_svc.migration_mgr.migrations[rec19.migration_id].state == MigrationState.ABORTED
+    assert coord_svc.migration_mgr.migrations[rec20.migration_id].state == MigrationState.ABORTED
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Focused Regression Tests: Crash Window & Durable Commitment Invariants
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_crash_window_primary_restart_follower_available_committed_survives(
+    tmp_path: Path,
+) -> None:
+    """Scenarios 1, 2, 5:
+
+    Primary crashes immediately after follower fsync but before local committed_seq persistence.
+    Primary restarts while follower is available.
+    Verify:
+    - Operation 10 is discovered as committed via follower reconciliation.
+    - Operation survives recovery and is applied to engine.
+    - Local committed_seq and WAL remain consistent.
+    """
+    p_dir = tmp_path / "primary"
+    f_dir = tmp_path / "follower"
+    p_settings = _make_settings(p_dir)
+    f_settings = _make_settings(f_dir)
+    shard_id = "shard0"
+
+    # Start follower
+    f_app = build_app(
+        settings=f_settings,
+        node_id="f1",
+        shard_id=shard_id,
+        role=NodeRole.FOLLOWER,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+    )
+    async with LifespanManager(f_app):
+        f_transport = ASGITransport(app=f_app)
+
+        # Start primary and execute initial committed write (seq=1)
+        p_app1 = build_app(
+            settings=p_settings,
+            node_id="p1",
+            shard_id=shard_id,
+            role=NodeRole.PRIMARY,
+            ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+            follower_url="http://f1",
+            http_client=AsyncClient(mounts={"http://f1": f_transport}),
+        )
+        async with LifespanManager(p_app1):
+            p1_state = p_app1.state.node
+            async with AsyncClient(transport=ASGITransport(app=p_app1), base_url="http://p1") as c1:
+                r1 = await c1.post(
+                    "/doc",
+                    json={"request_id": "req-1", "document": {"doc_id": 10, "val": "v1"}},
+                    headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+                )
+                assert r1.status_code in (200, 201)
+                assert p1_state.committed_seq == 1
+                assert p1_state.wal.last_seq == 1
+
+                # Replicate seq=2 directly to follower (follower writes and fsyncs seq=2)
+                repl_body = {
+                    "shard_id": shard_id,
+                    "seq": 2,
+                    "term": 1,
+                    "op": "insert",
+                    "doc_id": 20,
+                    "request_id": "req-20",
+                    "payload": {"doc_id": 20, "val": "v20"},
+                }
+                b_bytes = json.dumps(repl_body).encode("utf-8")
+                async with AsyncClient(transport=f_transport, base_url="http://f1") as fc:
+                    rep_resp = await fc.post(
+                        "/internal/replicate",
+                        content=b_bytes,
+                        headers=_cluster_headers(b_bytes),
+                    )
+                    assert rep_resp.status_code == 200
+
+                # Append seq=2 to primary WAL, but simulate crash before updating committed_seq
+                p1_state.wal.append(
+                    seq=2,
+                    term=1,
+                    op="insert",
+                    doc_id=20,
+                    request_id="req-20",
+                    payload={"doc_id": 20, "val": "v20"},
+                )
+                assert p1_state.wal.last_seq == 2
+                assert p1_state.committed_seq == 1  # Still 1 on primary!
+
+        # Primary has crashed. Now verify disk state before restart:
+        # WAL has seq=2, but node_metadata.json on disk has committed_seq=1.
+        meta_file = p_dir / shard_id / "node_metadata.json"
+        with open(meta_file, encoding="utf-8") as f:
+            disk_meta = json.load(f)
+        assert disk_meta["committed_seq"] == 1
+
+        # Restart primary with follower available
+        p_app2 = build_app(
+            settings=p_settings,
+            node_id="p1",
+            shard_id=shard_id,
+            role=NodeRole.PRIMARY,
+            ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+            follower_url="http://f1",
+            http_client=AsyncClient(mounts={"http://f1": f_transport}),
+        )
+        async with LifespanManager(p_app2):
+            p2_state = p_app2.state.node
+
+            # Reconcile pending write req-20
+            res = await _run_reconciliation(p2_state, "req-20")
+            assert res == "committed"
+
+            # Verify: Operation 20 survived recovery!
+            assert p2_state.engine.get(20) is not None
+            assert p2_state.engine.get(20)["val"] == "v20"
+            assert p2_state.committed_seq == 2
+            assert p2_state.wal.last_seq == 2
+
+
+async def _run_reconciliation(state: Any, request_id: str) -> str:
+    from docstore.common.models import WriteOutcome
+    from docstore.shard.app import _reconcile_pending_write
+
+    outcome = await _reconcile_pending_write(state, request_id)
+    return "committed" if outcome == WriteOutcome.COMMITTED else "unknown"
+
+
+@pytest.mark.asyncio
+async def test_crash_window_primary_restart_follower_unavailable_blocks_writes(
+    tmp_path: Path,
+) -> None:
+    """Scenarios 3, 7:
+
+    Primary restarts while follower is unavailable.
+    Verify:
+    - Unreconciled WAL tail is NOT discarded.
+    - Write outcome remains OUTCOME_UNKNOWN.
+    - Subsequent new writes are rejected/blocked (HTTP 503).
+    """
+    p_dir = tmp_path / "primary"
+    p_settings = _make_settings(p_dir)
+    shard_id = "shard0"
+
+    # Start primary and execute initial committed write (seq=1)
+    p_app1 = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+    )
+    async with LifespanManager(p_app1):
+        p1_state = p_app1.state.node
+        async with AsyncClient(transport=ASGITransport(app=p_app1), base_url="http://p1") as c1:
+            r1 = await c1.post(
+                "/doc",
+                json={"request_id": "req-1", "document": {"doc_id": 10, "val": "v1"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r1.status_code in (200, 201)
+
+            # Append seq=2 (req-20) to WAL, but leave committed_seq at 1
+            p1_state.wal.append(
+                seq=2,
+                term=1,
+                op="insert",
+                doc_id=20,
+                request_id="req-20",
+                payload={"doc_id": 20, "val": "v20"},
+            )
+            assert p1_state.wal.last_seq == 2
+            assert p1_state.committed_seq == 1
+
+    # Restart primary with UNAVAILABLE follower (mock transport returns ConnectionError / 503)
+    async def mock_follower_down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Follower down")
+
+    down_client = AsyncClient(transport=httpx.MockTransport(mock_follower_down))
+    p_app2 = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url="http://follower",
+        http_client=down_client,
+    )
+    async with LifespanManager(p_app2):
+        p2_state = p_app2.state.node
+
+        # WAL tail must NOT be truncated
+        assert p2_state.wal.last_seq == 2
+        assert p2_state.committed_seq == 1
+        # req-20 is pending unresolved
+        assert "req-20" in p2_state.pending_unresolved_writes
+        # Not applied to engine yet
+        assert p2_state.engine.get(20) is None
+
+        # Promote to primary to attempt writes
+        transport2 = ASGITransport(app=p_app2)
+        async with AsyncClient(transport=transport2, base_url="http://p2") as c2:
+            prom_bytes = json.dumps({"term": 2, "follower_url": "http://follower"}).encode("utf-8")
+            await c2.post(
+                "/internal/promote",
+                content=prom_bytes,
+                headers=_cluster_headers(prom_bytes),
+            )
+
+            # Tail remains intact after promote when follower is down
+            assert p2_state.wal.last_seq == 2
+            assert "req-20" in p2_state.pending_unresolved_writes
+
+            # 7. Attempt new write (req-30): MUST BE REJECTED with 503 ReplicationUnavailable
+            r30 = await c2.post(
+                "/doc",
+                json={"request_id": "req-30", "document": {"doc_id": 30, "val": "v30"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r30.status_code == 503
+            err_code = r30.json().get("detail", {}).get("error_code") or r30.json().get(
+                "error_code"
+            )
+            assert err_code == "REPLICATION_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_crash_window_follower_promoted_before_old_primary_restarts(
+    tmp_path: Path,
+) -> None:
+    """Scenario 4:
+
+    Primary crashes after follower fsync.
+    Follower is promoted to primary before the old primary restarts.
+    Verify:
+    - Operation 20 survives on promoted primary.
+    - Old primary rejoins as follower and resyncs without losing operation 20.
+    """
+    p_dir = tmp_path / "primary"
+    f_dir = tmp_path / "follower"
+    p_settings = _make_settings(p_dir)
+    f_settings = _make_settings(f_dir)
+    shard_id = "shard0"
+
+    # Start follower
+    f_app = build_app(
+        settings=f_settings,
+        node_id="f1",
+        shard_id=shard_id,
+        role=NodeRole.FOLLOWER,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+    )
+    async with LifespanManager(f_app):
+        f_transport = ASGITransport(app=f_app)
+
+        # Primary executes write 1, replicates write 2 to follower, then crashes
+        p_app1 = build_app(
+            settings=p_settings,
+            node_id="p1",
+            shard_id=shard_id,
+            role=NodeRole.PRIMARY,
+            ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        )
+        async with LifespanManager(p_app1):
+            p1_state = p_app1.state.node
+            p1_state.wal.append(
+                seq=1,
+                term=1,
+                op="insert",
+                doc_id=10,
+                request_id="req-1",
+                payload={"doc_id": 10, "val": "v1"},
+            )
+            p1_state.engine.apply(
+                {
+                    "seq": 1,
+                    "term": 1,
+                    "op": "insert",
+                    "doc_id": 10,
+                    "request_id": "req-1",
+                    "payload": {"doc_id": 10, "val": "v1"},
+                }
+            )
+            p1_state.committed_seq = 1
+
+            # Follower receives seq=1 and seq=2
+            for seq, doc_id, req in [(1, 10, "req-1"), (2, 20, "req-20")]:
+                body = {
+                    "shard_id": shard_id,
+                    "seq": seq,
+                    "term": 1,
+                    "op": "insert",
+                    "doc_id": doc_id,
+                    "request_id": req,
+                    "payload": {"doc_id": doc_id, "val": f"v{doc_id}"},
+                }
+                b = json.dumps(body).encode("utf-8")
+                async with AsyncClient(transport=f_transport, base_url="http://f1") as fc:
+                    await fc.post("/internal/replicate", content=b, headers=_cluster_headers(b))
+
+            # Primary appends seq=2 to WAL, but crashes before updating committed_seq on disk
+            p1_state.wal.append(
+                seq=2,
+                term=1,
+                op="insert",
+                doc_id=20,
+                request_id="req-20",
+                payload={"doc_id": 20, "val": "v20"},
+            )
+            assert p1_state.wal.last_seq == 2
+            assert p1_state.committed_seq == 1
+
+        # Primary is crashed. Promote follower F1 to PRIMARY under term 2!
+        async with AsyncClient(transport=f_transport, base_url="http://f1") as fc:
+            prom_bytes = json.dumps({"term": 2, "ownership_epochs": {"0-1000": 2}}).encode("utf-8")
+            p_resp = await fc.post(
+                "/internal/promote", content=prom_bytes, headers=_cluster_headers(prom_bytes)
+            )
+            assert p_resp.status_code == 200
+
+        # Follower (now new primary) has operation 20
+        assert f_app.state.node.engine.get(20) is not None
+
+        # Now restart old primary A
+        p_app2 = build_app(
+            settings=p_settings,
+            node_id="p1",
+            shard_id=shard_id,
+            role=NodeRole.PRIMARY,
+            ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        )
+        async with LifespanManager(p_app2):
+            p2_state = p_app2.state.node
+            # Starts in follower role after disk recovery
+            assert p2_state.role == NodeRole.FOLLOWER
+
+            # Connect old primary to new primary F1 and resync
+            rejoin_client = AsyncClient(mounts={"http://f1": f_transport})
+            resynced = await resync_with_primary(p2_state, "f1", http_client=rejoin_client)
+            assert resynced is True
+
+            # Verify: Operation 20 survives on both new primary and old primary!
+            assert f_app.state.node.engine.get(20) is not None
+            assert p2_state.engine.get(20) is not None
+            assert p2_state.engine.get(20)["val"] == "v20"
+
+
+@pytest.mark.asyncio
+async def test_crash_window_uncommitted_operation_authoritatively_discarded(
+    tmp_path: Path,
+) -> None:
+    """Scenario 6:
+
+    Operation was never committed (never reached follower).
+    Follower authoritatively confirms absence.
+    Verify:
+    - Operation is safely discarded from WAL and engine.
+    - Contiguous sequence numbers are preserved for subsequent writes.
+    """
+    p_dir = tmp_path / "primary"
+    p_settings = _make_settings(p_dir)
+    shard_id = "shard0"
+
+    # Start primary and execute committed write (seq=1)
+    p_app1 = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+    )
+    async with LifespanManager(p_app1):
+        p1_state = p_app1.state.node
+        async with AsyncClient(transport=ASGITransport(app=p_app1), base_url="http://p1") as c1:
+            r1 = await c1.post(
+                "/doc",
+                json={"request_id": "req-1", "document": {"doc_id": 10, "val": "v1"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r1.status_code in (200, 201)
+
+            # Append uncommitted seq=2 to WAL only (never replicated)
+            p1_state.wal.append(
+                seq=2,
+                term=1,
+                op="insert",
+                doc_id=20,
+                request_id="req-uncommitted",
+                payload={"doc_id": 20, "val": "uncommitted"},
+            )
+            assert p1_state.wal.last_seq == 2
+            assert p1_state.committed_seq == 1
+
+    # Restart primary with mock follower proving authoritative absence
+    async def mock_follower_absent(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/replicate":
+            b = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={"status": "ok", "seq": b.get("seq", 2), "last_seq": b.get("seq", 2)},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "has_op": False,
+                "term": 1,
+                "wal_last_seq": 5,
+                "entry_found": False,
+            },
+        )
+
+    absent_client = AsyncClient(transport=httpx.MockTransport(mock_follower_absent))
+    p_app2 = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url="http://follower",
+        http_client=absent_client,
+    )
+    async with LifespanManager(p_app2):
+        p2_state = p_app2.state.node
+
+        # Promote to primary
+        transport2 = ASGITransport(app=p_app2)
+        async with AsyncClient(transport=transport2, base_url="http://p2") as c2:
+            prom_bytes = json.dumps({"term": 2, "follower_url": "http://follower"}).encode("utf-8")
+            await c2.post(
+                "/internal/promote",
+                content=prom_bytes,
+                headers=_cluster_headers(prom_bytes),
+            )
+            p2_state.follower_state = ReplicaState.SYNCED
+
+            # Reconcile uncommitted write: Authoritative absence discards seq=2
+            res = await _run_reconciliation(p2_state, "req-uncommitted")
+            assert res == "unknown"
+
+            # Verify uncommitted operation is discarded
+            assert p2_state.wal.last_seq == 1
+            assert p2_state.committed_seq == 1
+            assert p2_state.engine.get(20) is None
+            assert "req-uncommitted" not in p2_state.pending_unresolved_writes
+
+            # Next write succeeds at contiguous sequence number 2
+            r2 = await c2.post(
+                "/doc",
+                json={"request_id": "req-fresh", "document": {"doc_id": 30, "val": "fresh"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert r2.status_code in (200, 201)
+            assert p2_state.wal.last_seq == 2
+            assert p2_state.engine.get(30) is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. Durable Commit Protocol & Degraded Mode Regression Tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_regression_follower_unavailable_write_rejected_and_no_local_ack(tmp_path: Path):
+    """Regression test 1, 2, 6:
+    1. Follower unavailable: new write is rejected with HTTP 503 REPLICATION_UNAVAILABLE.
+    2. Follower unavailable: no local-only write is acknowledged.
+    6. Coordinator lease authorization without follower fsync cannot commit a write.
+    """
+    p_settings = _make_settings(tmp_path / "primary")
+    shard_id = "shard0"
+
+    p_app = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url="http://follower",
+    )
+
+    async with LifespanManager(p_app):
+        p_state = p_app.state.node
+        # 1. Follower is DOWN (degraded mode)
+        p_state.follower_state = ReplicaState.DOWN
+
+        # 2. Coordinator lease authorization is active
+        p_state.lease_expires_at = time.monotonic() + 10.0
+
+        p_trans = ASGITransport(app=p_app)
+        async with AsyncClient(transport=p_trans, base_url="http://primary") as client:
+            # 3. Client attempts a write while follower is unavailable
+            doc_payload = {
+                "request_id": "req-deg-1",
+                "document": {"doc_id": 10, "val": "degraded_attempt"},
+            }
+            resp = await client.post(
+                "/doc",
+                json=doc_payload,
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+
+            # Verification 1: New write is rejected with HTTP 503 REPLICATION_UNAVAILABLE
+            assert resp.status_code == 503
+            err_data = resp.json().get("detail", {})
+            err_code = err_data.get("error_code") or resp.json().get("error_code")
+            assert err_code == "REPLICATION_UNAVAILABLE"
+
+            # Verification 2: No local-only write was acknowledged or committed
+            assert p_state.wal.last_seq == 0
+            assert p_state.committed_seq == 0
+            assert p_state.engine.get(10) is None
+            assert p_state.engine.dedup_check("req-deg-1") is None
+
+            # Verification 6: Coordinator lease authorization does not commit write
+            p_state.lease_expires_at = time.monotonic() + 100.0
+            assert p_state.is_lease_valid() is True
+
+            # Attempt write again with valid lease - still rejected with 503
+            resp2 = await client.post(
+                "/doc",
+                json=doc_payload,
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert resp2.status_code == 503
+            err_code2 = resp2.json().get("detail", {}).get("error_code") or resp2.json().get(
+                "error_code"
+            )
+            assert err_code2 == "REPLICATION_UNAVAILABLE"
+            assert p_state.wal.last_seq == 0
+            assert p_state.engine.get(10) is None
+
+
+@pytest.mark.asyncio
+async def test_regression_primary_crash_after_degraded_write_follower_promoted(tmp_path: Path):
+    """Regression test 3, 4, 5:
+    3. Primary crashes after a degraded-mode write attempt.
+    4. Follower is promoted after primary failure.
+    5. Previously acknowledged writes remain present.
+    """
+    f_settings = _make_settings(tmp_path / "follower")
+    p_settings = _make_settings(tmp_path / "primary")
+    shard_id = "shard0"
+
+    f_app = build_app(
+        settings=f_settings,
+        node_id="f1",
+        shard_id=shard_id,
+        role=NodeRole.FOLLOWER,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+    )
+    p_app = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url="http://follower",
+    )
+
+    async with LifespanManager(f_app), LifespanManager(p_app):
+        f_state = f_app.state.node
+        p_state = p_app.state.node
+
+        f_trans = ASGITransport(app=f_app)
+        f_client = AsyncClient(transport=f_trans, base_url="http://follower")
+        p_state.http_client = f_client
+        p_state.follower_state = ReplicaState.SYNCED
+
+        p_trans = ASGITransport(app=p_app)
+        async with AsyncClient(transport=p_trans, base_url="http://primary") as pc:
+            # 1. Successful synchronously replicated write
+            ack_resp = await pc.post(
+                "/doc",
+                json={"request_id": "req-ack", "document": {"doc_id": 10, "val": "acknowledged"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert ack_resp.status_code in (200, 201)
+            assert p_state.committed_seq == 1
+            assert f_state.engine.get(10) is not None
+
+            # 2. Follower becomes unavailable
+            p_state.follower_state = ReplicaState.DOWN
+
+            # 3. Degraded write attempt is rejected
+            deg_resp = await pc.post(
+                "/doc",
+                json={"request_id": "req-deg", "document": {"doc_id": 20, "val": "degraded"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert deg_resp.status_code == 503
+            assert p_state.engine.get(20) is None
+            assert p_state.wal.last_seq == 1
+
+    # 4. Primary crashes (LifespanManager exited above)
+    # 5. Follower is promoted after primary failure
+    async with LifespanManager(f_app):
+        prom_f_state = f_app.state.node
+        prom_trans = ASGITransport(app=f_app)
+        async with AsyncClient(transport=prom_trans, base_url="http://f1") as fc:
+            prom_bytes = json.dumps(
+                {
+                    "term": 2,
+                    "follower_url": "http://old-primary",
+                    "ownership_epochs": {"0-1000": 2},
+                }
+            ).encode("utf-8")
+            prom_resp = await fc.post(
+                "/internal/promote",
+                content=prom_bytes,
+                headers=_cluster_headers(prom_bytes),
+            )
+            assert prom_resp.status_code == 200
+            assert prom_f_state.role == NodeRole.PRIMARY
+            assert prom_f_state.term == 2
+
+            # Verification 5: Previously acknowledged write remains present!
+            read_resp = await fc.get("/doc/10", headers={CLIENT_KEY_HEADER: CLIENT_KEY})
+            assert read_resp.status_code == 200
+            assert read_resp.json()["document"]["doc_id"] == 10
+            assert read_resp.json()["document"]["val"] == "acknowledged"
+
+            # The unacknowledged degraded write attempt is absent
+            read_absent = await fc.get("/doc/20", headers={CLIENT_KEY_HEADER: CLIENT_KEY})
+            assert read_absent.status_code == 404
+
+            # In degraded mode (old primary down), promoted follower safely rejects writes
+            deg_write = await fc.post(
+                "/doc",
+                json={"request_id": "req-new", "document": {"doc_id": 30, "val": "new"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert deg_write.status_code == 503
+            err_code = deg_write.json().get("detail", {}).get("error_code") or deg_write.json().get(
+                "error_code"
+            )
+            assert err_code == "REPLICATION_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_regression_writes_resume_after_follower_sync_restored(tmp_path: Path):
+    """Regression test 7:
+    7. Writes resume after follower synchronization is restored.
+    """
+    f_settings = _make_settings(tmp_path / "follower")
+    p_settings = _make_settings(tmp_path / "primary")
+    shard_id = "shard0"
+
+    f_app = build_app(
+        settings=f_settings,
+        node_id="f1",
+        shard_id=shard_id,
+        role=NodeRole.FOLLOWER,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+    )
+    p_app = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url="http://follower",
+    )
+
+    async with LifespanManager(f_app), LifespanManager(p_app):
+        f_state = f_app.state.node
+        p_state = p_app.state.node
+
+        f_trans = ASGITransport(app=f_app)
+        f_client = AsyncClient(transport=f_trans, base_url="http://follower")
+        p_state.http_client = f_client
+
+        # Follower initially down
+        p_state.follower_state = ReplicaState.DOWN
+
+        p_trans = ASGITransport(app=p_app)
+        async with AsyncClient(transport=p_trans, base_url="http://primary") as pc:
+            # Write is rejected while follower is down
+            w_fail = await pc.post(
+                "/doc",
+                json={"request_id": "req-blocked", "document": {"doc_id": 10, "val": "blocked"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert w_fail.status_code == 503
+
+            # Synchronization restored: follower rejoins and resyncs to SYNCED
+            rejoin_bytes = json.dumps(
+                {
+                    "follower_url": "http://follower",
+                    "last_applied_seq": f_state.engine.last_applied_seq,
+                }
+            ).encode("utf-8")
+            rejoin_resp = await pc.post(
+                "/internal/rejoin/complete",
+                content=rejoin_bytes,
+                headers=_cluster_headers(rejoin_bytes),
+            )
+            assert rejoin_resp.status_code == 200
+            assert p_state.follower_state == ReplicaState.SYNCED
+
+            # Verification 7: Writes resume successfully after synchronization restored
+            w_resumed = await pc.post(
+                "/doc",
+                json={"request_id": "req-resumed", "document": {"doc_id": 10, "val": "resumed"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert w_resumed.status_code in (200, 201)
+            assert p_state.committed_seq == 1
+            assert f_state.engine.get(10) is not None
+            assert f_state.engine.get(10)["val"] == "resumed"
+
+
+@pytest.mark.asyncio
+async def test_regression_unresolved_write_preserves_outcome_unknown_and_blocks_subsequent(
+    tmp_path: Path,
+):
+    """Requirements 4 & 5:
+    4. Preserve unresolved writes as OUTCOME_UNKNOWN.
+    5. Do not allow subsequent writes while an earlier write remains unresolved.
+    """
+    p_settings = _make_settings(tmp_path / "primary")
+    shard_id = "shard0"
+
+    # Mock follower that fails during replication RPC
+    async def mock_follower_fail(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"status": "error", "detail": "Replication RPC failed"})
+
+    fail_client = AsyncClient(transport=httpx.MockTransport(mock_follower_fail))
+
+    p_app = build_app(
+        settings=p_settings,
+        node_id="p1",
+        shard_id=shard_id,
+        role=NodeRole.PRIMARY,
+        ranges=[ShardRangeConfig(start=0, end=1000, ownership_epoch=1)],
+        follower_url="http://follower",
+        http_client=fail_client,
+    )
+
+    async with LifespanManager(p_app):
+        p_state = p_app.state.node
+        p_state.follower_state = ReplicaState.SYNCED
+
+        p_trans = ASGITransport(app=p_app)
+        async with AsyncClient(transport=p_trans, base_url="http://primary") as pc:
+            # 1. Write attempt fails mid-replication
+            w1 = await pc.post(
+                "/doc",
+                json={"request_id": "req-unres", "document": {"doc_id": 10, "val": "unresolved"}},
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            # Preserved as OUTCOME_UNKNOWN (202 Accepted)
+            assert w1.status_code == 202
+            err_code = w1.json().get("detail", {}).get("error_code") or w1.json().get("error_code")
+            assert err_code == "OUTCOME_UNKNOWN"
+
+            # Verification 4: Preserved in pending_unresolved_writes and dedup
+            assert "req-unres" in p_state.pending_unresolved_writes
+            dedup = p_state.engine.dedup_check("req-unres")
+            assert dedup is not None
+            assert dedup.outcome == WriteOutcome.OUTCOME_UNKNOWN
+
+            # Verification 5: Subsequent writes with different request_id are blocked
+            w2 = await pc.post(
+                "/doc",
+                json={
+                    "request_id": "req-subsequent",
+                    "document": {"doc_id": 20, "val": "subsequent"},
+                },
+                headers={CLIENT_KEY_HEADER: CLIENT_KEY},
+            )
+            assert w2.status_code == 503
+            w2_err = w2.json().get("detail", {}).get("error_code") or w2.json().get("error_code")
+            assert w2_err == "REPLICATION_UNAVAILABLE"
+            assert (
+                "Cannot accept subsequent writes while an earlier write has an unresolved replication outcome"
+                in str(w2.json())
+            )
+
+            # Primary did not append subsequent write to WAL
+            assert p_state.wal.last_seq == 1
+            assert p_state.engine.get(20) is None
