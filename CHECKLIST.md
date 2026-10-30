@@ -508,13 +508,13 @@
 
 ## Module 10 — Client CLI / API  👤 All
 
-- [ ] Python client library wrapping router calls: generates `request_id`, retries transient errors, `outcome_unknown` and `REPLICATION_UNAVAILABLE` (with backoff) using the **same** `request_id`
-- [ ] CLI (`argparse`/`typer`): `insert`, `get`, `update`, `delete`, `query`, `status`, `shardmap`, `migrate`, `bulk-load`
-- [ ] `--read-mode primary|follower`; output shows `served_by`, lag
-- [ ] Pretty JSON; non-zero exit codes on errors; never print secrets/tokens (API key from env)
-- [ ] Usage examples in README
-- [ ] **Tests:** CLI happy paths and error exit codes
-- [ ] 🔖 **COMMIT:** `feat(client): CLI and Python client library`
+- [x] Python client library wrapping router calls: generates `request_id`, retries transient errors, `outcome_unknown` and `REPLICATION_UNAVAILABLE` (with backoff) using the **same** `request_id`
+- [x] CLI (`argparse`/`typer`): `insert`, `get`, `update`, `delete`, `query`, `status`, `shardmap`, `migrate`, `bulk-load`
+- [x] `--read-mode primary|follower`; output shows `served_by`, lag
+- [x] Pretty JSON; non-zero exit codes on errors; never print secrets/tokens (API key from env)
+- [x] Usage examples in README
+- [x] **Tests:** CLI happy paths and error exit codes
+- [x] 🔖 **COMMIT:** `feat(client): CLI and Python client library`
 
 ---
 

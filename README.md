@@ -248,6 +248,65 @@ make check
 
 ---
 
+## Client CLI & Python SDK (Module 10 / M7)
+
+The project includes a Python client library and CLI tool with automatic request ID generation, transparent retries reusing the same request ID, and typed exceptions:
+
+### 1. Python SDK (`docstore.client`)
+
+```python
+from docstore.client import DocStoreClient
+
+# Connect to cluster router & coordinator
+with DocStoreClient(router_url="http://127.0.0.1:8000", api_key="secret-key") as client:
+    # Insert document (auto-generates and reuses UUID request_id across retries)
+    res = client.insert({"doc_id": 100, "name": "Antigravity", "tags": ["db"]})
+    print(res["outcome"])  # "COMMITTED"
+
+    # Read from primary (default) or follower with replication lag
+    doc_primary = client.get(100, read_mode="primary")
+    doc_follower = client.get(100, read_mode="follower")
+    print(doc_follower["meta"]["served_by"], doc_follower["meta"]["replication_lag"])
+
+    # Query with filter, sorting, and pagination
+    results = client.query(filter={"tags": "db"}, sort_field="name", limit=10)
+    print(f"Total found: {results['total']}")
+
+    # Update and delete
+    client.update(100, {"doc_id": 100, "name": "Antigravity 2.0"})
+    client.delete(100)
+```
+
+### 2. Command Line Interface (`python -m docstore.client` or `docstore`)
+
+```bash
+# Set client credentials
+export CLIENT_API_KEY="client-api-key-16chars-min"
+export ADMIN_TOKEN="coordinator-admin-token-32chars-min"
+
+# 1. Insert document
+python -m docstore.client insert --doc '{"doc_id": 42, "title": "DistSys", "rating": 5}'
+
+# 2. Read document (primary or follower)
+python -m docstore.client get 42 --read-mode primary
+python -m docstore.client get 42 --read-mode follower
+
+# 3. Query documents
+python -m docstore.client query --filter '{"rating": {"$gte": 4}}' --limit 10
+
+# 4. Check cluster status & topology
+python -m docstore.client status
+python -m docstore.client shardmap
+
+# 5. Live range migration
+python -m docstore.client migrate --from-shard shard0 --to-shard shard1 --start 0 --end 1000
+
+# 6. Bulk-load JSON file
+python -m docstore.client bulk-load dataset.json
+```
+
+---
+
 ## Example Usage with `curl`
 
 Once the cluster (or router + shard node) is running, you can test operations using `curl`.
@@ -454,7 +513,8 @@ curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
 | **7** | ✅ Done | M4 Gate | Sync durable replication, follower reads, catch-up, lag metrics |
 | **8** | ✅ Done | M5 Gate | Failover detection, fencing & demotion/promotion |
 | **9** | ✅ Done | M6 Gate | Live range migration, catch-up, pause, epoch cutover |
-| **10–16** | ⬜ | M7 Gate | Python client SDK, Docker Compose, hardening, benchmarks, demo |
+| **10** | ✅ Done | M7 Gate | Python client library and Click CLI (`docstore-cli`) |
+| **11–16** | ⬜ | M7 Gate | Docker Compose, hardening, benchmarks, demo, release |
 
 ---
 
