@@ -156,6 +156,7 @@ class NodeState:
         self.primary_seq: int = 0  # tracked by follower for lag measurement
         self.http_client: httpx.AsyncClient | None = None
         self.paused_ranges: list[tuple[int, int]] = []
+        self.pending_unresolved_writes: dict[str, dict[str, Any]] = {}
 
     def owns(self, doc_id: int) -> bool:
         return any(r.start <= doc_id < r.end for r in self.ranges)
@@ -199,6 +200,34 @@ class NodeState:
 # ── Recovery ──────────────────────────────────────────────────────────────────
 
 
+def _persist_node_metadata(state: NodeState) -> None:
+    """Durably persist node term, role, and range configurations with fsync."""
+    data_dir = Path(state.settings.DATA_DIR) / state.shard_id
+    data_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = data_dir / "node_metadata.json"
+    tmp_path = data_dir / "node_metadata.json.tmp"
+
+    data = {
+        "term": state.term,
+        "role": state.role.value,
+        "ranges": [r.model_dump() for r in state.ranges],
+    }
+    payload = json.dumps(data, indent=2).encode("utf-8")
+    with open(tmp_path, "wb") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, meta_path)
+    try:
+        dirfd = os.open(str(data_dir), os.O_RDONLY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+    except OSError:
+        pass
+
+
 def _configure_ranges(state: NodeState) -> None:
     """Set default range from env vars if none configured."""
     if state.ranges:
@@ -210,7 +239,7 @@ def _configure_ranges(state: NodeState) -> None:
 
 
 async def _recover(state: NodeState) -> None:
-    """Load snapshot then replay WAL. Raises WALCorruptionError on bad WAL."""
+    """Load metadata, snapshot, then replay WAL. Raises WALCorruptionError on bad WAL."""
     data_dir = Path(state.settings.DATA_DIR) / state.shard_id
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -218,13 +247,29 @@ async def _recover(state: NodeState) -> None:
     state.snapshot_mgr = snap_mgr
     after_seq = 0
 
+    # 1. Load durable node metadata if present
+    meta_path = data_dir / "node_metadata.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+                state.term = meta.get("term", state.term)
+                if "role" in meta:
+                    state.role = NodeRole(meta["role"])
+                if "ranges" in meta and not state.ranges:
+                    for r in meta["ranges"]:
+                        state.ranges.append(ShardRangeConfig(**r))
+        except Exception as exc:
+            logger.warning("Failed to load node metadata from %s: %s", meta_path, exc)
+
+    # 2. Load snapshot if present
     snap = snap_mgr.load()
     if snap:
         for doc_id, doc in snap["documents"].items():
             state.engine._docs[doc_id] = doc
             state.engine._index[doc_id] = None
         state.engine.last_applied_seq = snap["last_applied_seq"]
-        state.term = snap.get("term", 1)
+        state.term = max(state.term, snap.get("term", 1))
         state.engine.dedup_import(snap.get("dedup_table", {}))
         after_seq = snap["last_applied_seq"]
 
@@ -245,6 +290,9 @@ async def _recover(state: NodeState) -> None:
     wal_entries = list(wal.replay(after_seq=after_seq))
     for entry in wal_entries:
         state.engine.apply(entry)
+        entry_term = entry.get("term", 1)
+        if entry_term > state.term:
+            state.term = entry_term
         rid = entry.get("request_id")
         if rid:
             state.engine.dedup_store(
@@ -256,9 +304,12 @@ async def _recover(state: NodeState) -> None:
                 ),
             )
 
+    _persist_node_metadata(state)
+
     logger.info(
-        "Recovery complete: shard=%s last_applied_seq=%d docs=%d",
+        "Recovery complete: shard=%s term=%d last_applied_seq=%d docs=%d",
         state.shard_id,
+        state.term,
         state.engine.last_applied_seq,
         state.engine.doc_count(),
     )
@@ -325,6 +376,89 @@ async def _replicate_to_follower(
             await client.aclose()
 
 
+async def _reconcile_pending_write(state: NodeState, request_id: str) -> WriteOutcome:
+    """Ask follower whether the pending operation was durably stored and resolve state.
+
+    - If the follower has the operation durably, apply it on the primary and mark it COMMITTED.
+    - If the follower does not have it, resolve it as uncommitted and allow retry to execute safely.
+    """
+    if not state.follower_url:
+        return WriteOutcome.OUTCOME_UNKNOWN
+
+    pending = state.pending_unresolved_writes.get(request_id)
+    seq: int | None = None
+    if pending:
+        seq = pending.get("seq")
+    else:
+        dedup = state.engine.dedup_check(request_id)
+        if dedup:
+            seq = dedup.seq
+
+    if seq is None:
+        return WriteOutcome.OUTCOME_UNKNOWN
+
+    clean_url = state.follower_url.removeprefix("http://").removeprefix("https://").rstrip("/")
+    url = f"http://{clean_url}/internal/check-op"
+    payload = {"seq": seq, "request_id": request_id}
+    body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sig = compute_signature(state.settings.CLUSTER_SECRET, body_bytes)
+    headers = {
+        "Content-Type": "application/json",
+        CLUSTER_SIG_HEADER: sig,
+    }
+
+    client = state.http_client
+    owns_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=state.settings.REPLICATION_TIMEOUT_S)
+        owns_client = True
+
+    try:
+        resp = await client.post(
+            url,
+            content=body_bytes,
+            headers=headers,
+            timeout=state.settings.REPLICATION_TIMEOUT_S,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("has_op"):
+                if pending:
+                    apply_entry = {
+                        "seq": seq,
+                        "term": pending.get("term", state.term),
+                        "op": pending["op"],
+                        "doc_id": pending["doc_id"],
+                        "request_id": request_id,
+                        "payload": pending.get("payload"),
+                    }
+                    state.engine.apply(apply_entry)
+                state.engine.dedup_store(
+                    request_id,
+                    DedupEntry(
+                        seq=seq,
+                        outcome=WriteOutcome.COMMITTED,
+                        result={"outcome": WriteOutcome.COMMITTED, "seq": seq},
+                    ),
+                )
+                state.pending_unresolved_writes.pop(request_id, None)
+                state.follower_acked_seq = max(state.follower_acked_seq, seq)
+                logger.info("Pending write %s (seq=%d) reconciled as COMMITTED", request_id, seq)
+                return WriteOutcome.COMMITTED
+            else:
+                state.pending_unresolved_writes.pop(request_id, None)
+                state.engine._dedup.pop(request_id, None)
+                logger.info("Pending write %s (seq=%d) reconciled as UNCOMMITTED", request_id, seq)
+                return WriteOutcome.OUTCOME_UNKNOWN
+    except Exception as exc:
+        logger.warning("Could not reconcile pending write %s with follower: %s", request_id, exc)
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    return WriteOutcome.OUTCOME_UNKNOWN
+
+
 # ── Write Helper ──────────────────────────────────────────────────────────────
 
 
@@ -357,24 +491,65 @@ async def _execute_write(
                 f"doc_id={doc_id} is outside all ranges owned by shard {state.shard_id}."
             )
 
-        # 4. Dedup check: return original result for retried request_id
+        # 4. Check & reconcile pending unresolved writes before proceeding
+        if state.pending_unresolved_writes:
+            if request_id in state.pending_unresolved_writes:
+                reconciled = await _reconcile_pending_write(state, request_id)
+                if reconciled == WriteOutcome.COMMITTED:
+                    ent = state.engine.dedup_check(request_id)
+                    s = ent.seq if ent else 0
+                    return WriteResponse(
+                        outcome=WriteOutcome.COMMITTED,
+                        request_id=request_id,
+                        seq=s,
+                        meta=state.response_meta(doc_id),
+                    )
+                elif request_id in state.pending_unresolved_writes:
+                    p_seq = state.pending_unresolved_writes[request_id]["seq"]
+                    raise OutcomeUnknown(
+                        f"Previous write attempt (seq={p_seq}) outcome remains unknown on follower."
+                    )
+            else:
+                for p_rid in list(state.pending_unresolved_writes.keys()):
+                    await _reconcile_pending_write(state, p_rid)
+                if state.pending_unresolved_writes:
+                    raise ReplicationUnavailable(
+                        "Cannot accept subsequent writes while an earlier write has "
+                        "an unresolved replication outcome."
+                    )
+
+        # 5. Dedup check: return original result for retried request_id
         existing = state.engine.dedup_check(request_id)
         if existing is not None:
-            return WriteResponse(
-                outcome=WriteOutcome(existing.outcome),
-                request_id=request_id,
-                seq=existing.seq,
-                meta=state.response_meta(doc_id),
-            )
+            if existing.outcome == WriteOutcome.OUTCOME_UNKNOWN:
+                reconciled = await _reconcile_pending_write(state, request_id)
+                if reconciled == WriteOutcome.COMMITTED:
+                    return WriteResponse(
+                        outcome=WriteOutcome.COMMITTED,
+                        request_id=request_id,
+                        seq=existing.seq,
+                        meta=state.response_meta(doc_id),
+                    )
+                elif request_id in state.pending_unresolved_writes:
+                    raise OutcomeUnknown(
+                        f"Previous write attempt (seq={existing.seq}) outcome remains unknown."
+                    )
+            else:
+                return WriteResponse(
+                    outcome=WriteOutcome(existing.outcome),
+                    request_id=request_id,
+                    seq=existing.seq,
+                    meta=state.response_meta(doc_id),
+                )
 
-        # 5. Follower SYNCED check (if replicated)
+        # 6. Follower SYNCED check (if replicated)
         if state.follower_url:
             if state.follower_state != ReplicaState.SYNCED:
                 raise ReplicationUnavailable(
                     f"Follower is {state.follower_state.value}; write rejected before WAL append."
                 )
 
-        # 6. Pre-WAL business logic validity check
+        # 7. Pre-WAL business logic validity check
         if op == WriteOp.INSERT:
             if doc_id in state.engine._docs:
                 raise DuplicateKey(f"doc_id={doc_id} already exists.")
@@ -390,7 +565,7 @@ async def _execute_write(
             doc_id=doc_id,
         )
 
-        # 7. Assign sequence number & append to primary WAL (durable)
+        # 8. Assign sequence number & append to primary WAL (durable)
         assert state.wal is not None
         seq = state.wal.next_seq()
         state.wal.append(
@@ -411,12 +586,19 @@ async def _execute_write(
             doc_id=doc_id,
         )
 
-        # 8. Synchronous replication to follower
+        # 9. Synchronous replication to follower
         if state.follower_url:
             replicated = await _replicate_to_follower(state, seq, op, doc_id, request_id, payload)
             if not replicated:
                 # Follower failed after primary WAL append: outcome unknown
                 state.follower_state = ReplicaState.DOWN
+                state.pending_unresolved_writes[request_id] = {
+                    "seq": seq,
+                    "term": state.term,
+                    "op": op.value,
+                    "doc_id": doc_id,
+                    "payload": payload,
+                }
                 state.engine.dedup_store(
                     request_id,
                     DedupEntry(
@@ -429,6 +611,7 @@ async def _execute_write(
                     f"Write appended to primary WAL (seq={seq}), but follower replication failed."
                 )
             state.follower_acked_seq = seq
+            state.pending_unresolved_writes.pop(request_id, None)
 
         # 9. Apply to memory state via engine.apply() — unified idempotent codepath (M3)
         apply_entry = {
@@ -1065,6 +1248,24 @@ def build_app(
             last_seq=state.wal.last_seq,
         )
 
+    @app.post("/internal/check-op", dependencies=[Depends(cluster_auth)])
+    async def check_op(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        seq = body.get("seq")
+        request_id = body.get("request_id")
+        if request_id:
+            entry = state.engine.dedup_check(request_id)
+            if entry and entry.outcome == WriteOutcome.COMMITTED:
+                return {"status": "ok", "has_op": True, "seq": entry.seq}
+        if state.wal and seq is not None:
+            for w in state.wal.replay(after_seq=max(0, seq - 1)):
+                if w.get("seq") == seq:
+                    if not request_id or w.get("request_id") == request_id:
+                        return {"status": "ok", "has_op": True, "seq": seq}
+                if w.get("seq", 0) > seq:
+                    break
+        return {"status": "ok", "has_op": False}
+
     @app.get("/internal/snapshot", dependencies=[Depends(cluster_auth)])
     async def get_snapshot(request: Request) -> dict[str, Any]:
         state = get_node(request)
@@ -1180,6 +1381,8 @@ def build_app(
                             ),
                         )
 
+            _persist_node_metadata(state)
+
             logger.info(
                 "Promoted node %s to PRIMARY for shard %s in term %d (degraded mode)",
                 state.node_id,
@@ -1248,7 +1451,21 @@ def build_app(
         start = body["start"]
         end = body["end"]
         async with state.write_lock():
-            s_seq = state.wal.last_seq if state.wal else 0
+            # Resolve all pending writes before migration snapshot
+            if state.pending_unresolved_writes:
+                for req_id in list(state.pending_unresolved_writes.keys()):
+                    await _reconcile_pending_write(state, req_id)
+            if state.pending_unresolved_writes:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error_code": "REPLICATION_UNAVAILABLE",
+                        "error_message": (
+                            "Unresolved pending writes exist; cannot start migration snapshot."
+                        ),
+                    },
+                )
+            s_seq = state.engine.last_applied_seq
             docs = state.engine.range_snapshot(start, end)
             return {
                 "status": "ok",
@@ -1409,6 +1626,7 @@ def build_app(
             else:
                 state.ranges.append(ShardRangeConfig(start=start, end=end, ownership_epoch=epoch))
                 state.ranges.sort(key=lambda r: r.start)
+            _persist_node_metadata(state)
             logger.info(
                 "Cutover range [%d, %d) epoch %d to shard %s (node %s)",
                 start,
@@ -1446,6 +1664,7 @@ def build_app(
                 else:
                     new_ranges.append(r)
             state.ranges = new_ranges
+            _persist_node_metadata(state)
 
             # 3. Delete docs from storage engine
             docs = state.engine.range_snapshot(start, end)

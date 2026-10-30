@@ -108,6 +108,12 @@ class CoordinatorService:
         """A shard is degraded if its follower is not in SYNCED state."""
         return self.replica_states.get(shard_id, ReplicaState.DOWN) != ReplicaState.SYNCED
 
+    async def resume_unfinished_migrations(
+        self, http_client: httpx.AsyncClient | None = None
+    ) -> list[Any]:
+        """Resume or abort unfinished migrations found upon coordinator startup."""
+        return await self.migration_mgr.resume_or_recover_unfinished(self, http_client=http_client)
+
     # ── Shard Map & Epoch Management ──────────────────────────────────────────
 
     @property

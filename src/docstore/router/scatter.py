@@ -126,8 +126,9 @@ async def _query_single_shard(
     payload: dict[str, Any],
     cluster_secret: str,
     timeout_s: float,
+    needed_candidates: int,
 ) -> list[dict[str, Any]]:
-    """Send query to a single shard primary and validate response range."""
+    """Send query to a single shard with internal chunking up to needed_candidates."""
     target = entry.primary
     if payload.get("read_mode") == "follower" and entry.follower:
         target = entry.follower
@@ -135,63 +136,81 @@ async def _query_single_shard(
     clean_target = target.removeprefix("http://").removeprefix("https://")
     url = f"http://{clean_target}/query"
 
-    body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    sig = compute_signature(cluster_secret, body_bytes)
-    headers = {
-        "Content-Type": "application/json",
-        CLUSTER_SIG_HEADER: sig,
-    }
+    collected_docs: list[dict[str, Any]] = []
+    current_skip = 0
 
-    try:
-        resp = await client.post(url, content=body_bytes, headers=headers, timeout=timeout_s)
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        # H4: only fall back to primary for genuine connectivity failures.
-        # Other exceptions (INVALID_QUERY, STALE_EPOCH, etc.) must propagate.
-        if target != entry.primary:
-            logger.warning(
-                "Follower %s unreachable (%s); falling back to primary %s",
-                target,
-                exc,
-                entry.primary,
-            )
-            primary = entry.primary.removeprefix("http://").removeprefix("https://")
-            resp = await client.post(
-                f"http://{primary}/query", content=body_bytes, headers=headers, timeout=timeout_s
-            )
-        else:
-            raise
-    if resp.status_code != 200:
+    while len(collected_docs) < needed_candidates:
+        chunk_limit = min(needed_candidates - len(collected_docs), QUERY_LIMIT_MAX)
+        chunk_payload = dict(payload)
+        chunk_payload["skip"] = current_skip
+        chunk_payload["limit"] = chunk_limit
+
+        body_bytes = json.dumps(chunk_payload, separators=(",", ":")).encode("utf-8")
+        sig = compute_signature(cluster_secret, body_bytes)
+        headers = {
+            "Content-Type": "application/json",
+            CLUSTER_SIG_HEADER: sig,
+        }
+
         try:
-            data = resp.json()
-            err_code = data.get("detail", {}).get("error_code") or data.get("error_code")
-            err_msg = data.get("detail", {}).get("error_message") or data.get("error_message")
-        except Exception:
-            err_code = "SHARD_ERROR"
-            err_msg = resp.text
-        raise RuntimeError(
-            f"Shard {entry.shard_id} returned HTTP {resp.status_code} ({err_code}): {err_msg}"
-        )
-
-    data = resp.json()
-    docs = data.get("documents", [])
-
-    # Filter out any document outside the responding shard's range
-    valid_docs: list[dict[str, Any]] = []
-    for doc in docs:
-        if isinstance(doc, dict) and "doc_id" in doc and is_number(doc["doc_id"]):
-            did = int(doc["doc_id"])
-            if entry.range.start <= did < entry.range.end:
-                valid_docs.append(doc)
-            else:
+            resp = await client.post(url, content=body_bytes, headers=headers, timeout=timeout_s)
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            # H4: only fall back to primary for genuine connectivity failures.
+            # Other exceptions (INVALID_QUERY, STALE_EPOCH, etc.) must propagate.
+            if target != entry.primary:
                 logger.warning(
-                    "Dropping out-of-range document %d returned by shard %s [%d, %d)",
-                    did,
-                    entry.shard_id,
-                    entry.range.start,
-                    entry.range.end,
+                    "Follower %s unreachable (%s); falling back to primary %s",
+                    target,
+                    exc,
+                    entry.primary,
                 )
+                primary = entry.primary.removeprefix("http://").removeprefix("https://")
+                resp = await client.post(
+                    f"http://{primary}/query",
+                    content=body_bytes,
+                    headers=headers,
+                    timeout=timeout_s,
+                )
+            else:
+                raise
+        if resp.status_code != 200:
+            try:
+                data = resp.json()
+                err_code = data.get("detail", {}).get("error_code") or data.get("error_code")
+                err_msg = data.get("detail", {}).get("error_message") or data.get("error_message")
+            except Exception:
+                err_code = "SHARD_ERROR"
+                err_msg = resp.text
+            raise RuntimeError(
+                f"Shard {entry.shard_id} returned HTTP {resp.status_code} ({err_code}): {err_msg}"
+            )
 
-    return valid_docs
+        data = resp.json()
+        docs = data.get("documents", [])
+        if not docs:
+            break
+
+        # Filter out any document outside the responding shard's range
+        for doc in docs:
+            if isinstance(doc, dict) and "doc_id" in doc and is_number(doc["doc_id"]):
+                did = int(doc["doc_id"])
+                if entry.range.start <= did < entry.range.end:
+                    collected_docs.append(doc)
+                else:
+                    logger.warning(
+                        "Dropping out-of-range document %d returned by shard %s [%d, %d)",
+                        did,
+                        entry.shard_id,
+                        entry.range.start,
+                        entry.range.end,
+                    )
+
+        current_skip += len(docs)
+        if len(docs) < chunk_limit:
+            # Shard has returned all matching documents
+            break
+
+    return collected_docs
 
 
 async def execute_scatter_query(
@@ -204,8 +223,8 @@ async def execute_scatter_query(
 
     Raises :class:`fastapi.HTTPException` with 503 SHARD_UNAVAILABLE on partial failure.
     """
-    # Candidate depth: local skip=0, local limit = skip + limit
-    local_limit = min(query.skip + query.limit, QUERY_LIMIT_MAX)
+    # Candidate depth: local skip=0, candidates needed = skip + limit
+    needed_candidates = query.skip + query.limit
     timeout_s = min(settings.REPLICATION_TIMEOUT_S + 2.0, 5.0)
 
     # Allow up to 2 attempts (initial + 1 bounded retry on shard failure)
@@ -223,8 +242,6 @@ async def execute_scatter_query(
                 "filter": target_filter,
                 "sort_field": query.sort_field,
                 "sort_dir": query.sort_dir,
-                "skip": 0,
-                "limit": local_limit,
                 "read_mode": query.read_mode.value,
             }
             tasks.append(
@@ -234,6 +251,7 @@ async def execute_scatter_query(
                     shard_payload,
                     settings.CLUSTER_SECRET,
                     timeout_s,
+                    needed_candidates,
                 )
             )
 

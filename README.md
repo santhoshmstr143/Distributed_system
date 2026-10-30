@@ -174,7 +174,7 @@ python -m docstore.router
 
 ## Testing & Quality Gates
 
-The test suite contains **199 automated tests** covering unit storage, safe query filtering, shard routing, coordinator leases, replication durability, failover fencing, and live range migration.
+The test suite contains **230 automated tests** covering unit storage, safe query filtering, shard routing, coordinator leases, replication durability, failover fencing, and live range migration.
 
 ### Running Fast Tests (Unit + Integration)
 
@@ -529,7 +529,7 @@ curl -X GET http://127.0.0.1:8100/admin/migrate/{migration_id} \
 - **Single-Node Failure Scope:** Failover supports single-node (primary) failure per shard. If both replicas of a shard fail simultaneously, that shard is unavailable.
 - **Degraded Mode Write Rejection:** Writes are rejected (`REPLICATION_UNAVAILABLE`) after failover until the rejoining replica achieves `SYNCED` state. Synchronous replication is never relaxed.
 - **Clock Assumptions:** Elapsed monotonic clock time is used locally for leases; cross-machine clock synchronization is not required.
-- **Single-Writer Shard Model:** One write at a time per shard lock to guarantee strict serializability and synchronous replication consistency.
+- **Single-Writer Shard Model:** One write at a time per shard lock provides serialized writes within each individual shard; cross-shard multi-document transactions are not coordinated.
 
 ---
 

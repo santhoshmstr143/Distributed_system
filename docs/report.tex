@@ -192,6 +192,6 @@ Table~\ref{tab:migration} evaluates live range migration across dataset sizes. W
 \end{enumerate}
 
 \section{Conclusion}
-Sharded-Docstore demonstrates that strict serializability, zero lost updates, and zero-downtime range migration can be achieved efficiently through rigorous lease timing invariants, synchronous WAL persistence, and deterministic verification protocols. Benchmark evaluations confirm sub-2ms direct routing, sub-second failover recovery, and sub-100ms migration pause times, fulfilling all architectural commitments.
+Sharded-Docstore demonstrates that per-shard serialized writes, zero lost updates, and zero-downtime range migration can be achieved efficiently through rigorous lease timing invariants, synchronous WAL persistence, and deterministic verification protocols. Benchmark evaluations confirm sub-2ms direct routing, sub-second failover recovery, and sub-100ms migration pause times, fulfilling all architectural commitments.
 
 \end{document}

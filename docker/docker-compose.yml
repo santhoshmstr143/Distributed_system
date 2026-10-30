@@ -53,6 +53,9 @@ services:
       - DATA_DIR=/data
       - COORDINATOR_URL=http://coordinator:8100
       - ENABLE_TEST_HOOKS=false
+      - SHARD_RANGE_START=0
+      - SHARD_RANGE_END=3074457345618258602
+      - SHARD_OWNERSHIP_EPOCH=1
     volumes:
       - s0_f_data:/data
     networks:
@@ -91,6 +94,9 @@ services:
       - DATA_DIR=/data
       - COORDINATOR_URL=http://coordinator:8100
       - ENABLE_TEST_HOOKS=false
+      - SHARD_RANGE_START=0
+      - SHARD_RANGE_END=3074457345618258602
+      - SHARD_OWNERSHIP_EPOCH=1
     volumes:
       - s0_p_data:/data
     networks:
@@ -128,6 +134,9 @@ services:
       - DATA_DIR=/data
       - COORDINATOR_URL=http://coordinator:8100
       - ENABLE_TEST_HOOKS=false
+      - SHARD_RANGE_START=3074457345618258602
+      - SHARD_RANGE_END=6148914691236517204
+      - SHARD_OWNERSHIP_EPOCH=1
     volumes:
       - s1_f_data:/data
     networks:
@@ -166,6 +175,9 @@ services:
       - DATA_DIR=/data
       - COORDINATOR_URL=http://coordinator:8100
       - ENABLE_TEST_HOOKS=false
+      - SHARD_RANGE_START=3074457345618258602
+      - SHARD_RANGE_END=6148914691236517204
+      - SHARD_OWNERSHIP_EPOCH=1
     volumes:
       - s1_p_data:/data
     networks:
@@ -203,6 +215,9 @@ services:
       - DATA_DIR=/data
       - COORDINATOR_URL=http://coordinator:8100
       - ENABLE_TEST_HOOKS=false
+      - SHARD_RANGE_START=6148914691236517204
+      - SHARD_RANGE_END=9223372036854775808
+      - SHARD_OWNERSHIP_EPOCH=1
     volumes:
       - s2_f_data:/data
     networks:
@@ -241,6 +256,9 @@ services:
       - DATA_DIR=/data
       - COORDINATOR_URL=http://coordinator:8100
       - ENABLE_TEST_HOOKS=false
+      - SHARD_RANGE_START=6148914691236517204
+      - SHARD_RANGE_END=9223372036854775808
+      - SHARD_OWNERSHIP_EPOCH=1
     volumes:
       - s2_p_data:/data
     networks:

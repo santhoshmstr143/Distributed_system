@@ -459,3 +459,151 @@ class MigrationManager:
         finally:
             if owns_client:
                 await client.aclose()
+
+    async def resume_or_recover_unfinished(
+        self,
+        coord: CoordinatorService,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> list[MigrationRecord]:
+        """Scan and automatically recover or roll forward unfinished migrations on startup."""
+        unfinished = [
+            r
+            for r in self.migrations.values()
+            if r.state not in (MigrationState.DONE, MigrationState.ABORTED)
+        ]
+        if not unfinished:
+            return []
+
+        owns_client = False
+        client = http_client
+        if client is None:
+            client = httpx.AsyncClient(timeout=10.0)
+            owns_client = True
+
+        async def _rpc(url: str, body: dict[str, Any]) -> dict[str, Any]:
+            body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            sig = compute_signature(self.cluster_secret, body_bytes)
+            headers = {"Content-Type": "application/json", CLUSTER_SIG_HEADER: sig}
+            clean_url = url.removeprefix("http://").removeprefix("https://")
+            resp = await client.post(f"http://{clean_url}", content=body_bytes, headers=headers)
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"RPC to {url} failed status={resp.status_code} body={resp.text}"
+                )
+            result_data: dict[str, Any] = resp.json()
+            return result_data
+
+        recovered_records = []
+        try:
+            for rec in unfinished:
+                logger.info(
+                    "Found unfinished migration %s in state %s; resuming recovery",
+                    rec.migration_id,
+                    rec.state,
+                )
+                cur_map = coord.map_mgr.shard_map
+                src_entry = next((e for e in cur_map.entries if e.shard_id == rec.from_shard), None)
+                dest_entry = next((e for e in cur_map.entries if e.shard_id == rec.to_shard), None)
+
+                if rec.state in (MigrationState.CUTOVER, MigrationState.CLEANUP):
+                    # Point of no return has passed: MUST roll forward!
+                    logger.info(
+                        "Migration %s is past cutover; rolling forward to DONE",
+                        rec.migration_id,
+                    )
+                    epoch = rec.final_cutover_epoch
+                    if not epoch:
+                        epoch = coord.bump_range_migration(
+                            shard_id=rec.from_shard,
+                            start=rec.range_start,
+                            end=rec.range_end,
+                            new_shard_id=rec.to_shard,
+                        )
+                        rec.final_cutover_epoch = epoch
+                    rec.state = MigrationState.CLEANUP
+                    self.save_record(rec)
+
+                    if dest_entry and dest_entry.primary:
+                        try:
+                            await _rpc(
+                                f"{dest_entry.primary}/internal/migration/cutover",
+                                {
+                                    "start": rec.range_start,
+                                    "end": rec.range_end,
+                                    "ownership_epoch": epoch,
+                                },
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Cutover RPC to dest primary failed during recovery: %s", exc
+                            )
+
+                    if dest_entry and dest_entry.follower:
+                        try:
+                            await _rpc(
+                                f"{dest_entry.follower}/internal/migration/cutover",
+                                {
+                                    "start": rec.range_start,
+                                    "end": rec.range_end,
+                                    "ownership_epoch": epoch,
+                                },
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Cutover RPC to dest follower failed during recovery: %s", exc
+                            )
+
+                    if src_entry and src_entry.primary:
+                        try:
+                            await _rpc(
+                                f"{src_entry.primary}/internal/migration/cleanup",
+                                {"start": rec.range_start, "end": rec.range_end},
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Cleanup RPC to src primary failed during recovery: %s", exc
+                            )
+
+                    rec.state = MigrationState.DONE
+                    self.save_record(rec)
+                    recovered_records.append(rec)
+                    logger.info(
+                        "Migration %s successfully rolled forward to DONE",
+                        rec.migration_id,
+                    )
+
+                else:
+                    # Before cutover: safely abort
+                    logger.info("Migration %s is before cutover; safely aborting", rec.migration_id)
+                    if src_entry and src_entry.primary:
+                        try:
+                            await _rpc(
+                                f"{src_entry.primary}/internal/migration/unpause",
+                                {"start": rec.range_start, "end": rec.range_end},
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Unpause RPC to src primary failed during abort: %s", exc
+                            )
+
+                    if dest_entry and dest_entry.primary:
+                        try:
+                            await _rpc(
+                                f"{dest_entry.primary}/internal/migration/abort",
+                                {"start": rec.range_start, "end": rec.range_end},
+                            )
+                        except Exception as exc:
+                            logger.warning("Abort RPC to dest primary failed during abort: %s", exc)
+
+                    rec.state = MigrationState.ABORTED
+                    rec.error = "Aborted automatically on coordinator restart (pre-cutover)."
+                    self.save_record(rec)
+                    recovered_records.append(rec)
+                    logger.info("Migration %s aborted successfully", rec.migration_id)
+
+        finally:
+            if owns_client:
+                await client.aclose()
+
+        return recovered_records

@@ -54,6 +54,12 @@ def build_coordinator_app(
             svc.shard_map.map_version,
         )
 
+        # Resume or abort unfinished migrations on coordinator startup
+        try:
+            await svc.resume_unfinished_migrations()
+        except Exception as exc:
+            logger.warning("Unfinished migration recovery check error: %s", exc)
+
         # H5 / Module 8: Background health monitor — checks for timed-out nodes and auto-failovers.
         async def _health_monitor() -> None:
             while True:
