@@ -144,14 +144,22 @@ async def _query_single_shard(
 
     try:
         resp = await client.post(url, content=body_bytes, headers=headers, timeout=timeout_s)
-    except Exception as exc:
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        # H4: only fall back to primary for genuine connectivity failures.
+        # Other exceptions (INVALID_QUERY, STALE_EPOCH, etc.) must propagate.
         if target != entry.primary:
+            logger.warning(
+                "Follower %s unreachable (%s); falling back to primary %s",
+                target,
+                exc,
+                entry.primary,
+            )
             primary = entry.primary.removeprefix("http://").removeprefix("https://")
             resp = await client.post(
                 f"http://{primary}/query", content=body_bytes, headers=headers, timeout=timeout_s
             )
         else:
-            raise exc
+            raise
     if resp.status_code != 200:
         try:
             data = resp.json()

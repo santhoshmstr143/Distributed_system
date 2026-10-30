@@ -93,7 +93,7 @@ Inserts a new document. `doc_id` must be an integer in `[0, 2^63)`.
     }
   }
   ```
-- **Response (200 OK):**
+- **Response (201 Created):**
   ```json
   {
     "outcome": "COMMITTED",
@@ -110,6 +110,9 @@ Inserts a new document. `doc_id` must be an integer in `[0, 2^63)`.
     "error_message": null
   }
   ```
+
+  > **Note (L1):** `seq` is `null` for non-`COMMITTED` outcomes (`REJECTED`, `OUTCOME_UNKNOWN`).
+  > Clients must not assume `seq` is always an integer.
 
 ### 3.2 Get Document (`GET /doc/{id}`)
 

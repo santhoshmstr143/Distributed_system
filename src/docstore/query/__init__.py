@@ -16,7 +16,7 @@ __all__ = [
     "ShardKeyConstraint",
     "detect_shard_key_constraint",
     "evaluate_filter",
-    "extract_sort_key",
+    # "extract_sort_key" is an internal helper; not part of the public API (L4)
     "get_dotted_field",
     "sort_documents",
     "type_safe_equal",

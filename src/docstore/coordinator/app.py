@@ -3,8 +3,8 @@ FastAPI application for the Coordinator — Module 6.
 
 Public endpoints:
 - GET  /shardmap   — fetch current cluster shard map
-- POST /register   — node startup registration
-- POST /heartbeat  — node periodic heartbeats & primary lease renewals
+- POST /register   — node startup registration (cluster auth required)
+- POST /heartbeat  — node periodic heartbeats & primary lease renewals (cluster auth required)
 - GET  /health     — liveness probe
 
 Admin endpoints (X-Admin-Token required):
@@ -14,6 +14,7 @@ Admin endpoints (X-Admin-Token required):
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -21,7 +22,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from docstore.common.auth import make_admin_auth_dependency
+from docstore.common.auth import make_admin_auth_dependency, make_cluster_auth_dependency
 from docstore.common.config import Settings
 from docstore.common.errors import DocstoreError
 from docstore.common.logging import get_logger
@@ -52,16 +53,39 @@ def build_coordinator_app(
             "Coordinator started with map version %d",
             svc.shard_map.map_version,
         )
+
+        # H5: Background health monitor — checks for timed-out nodes every second.
+        # Extend coordinator.check_and_trigger_failover() in Module 8 for auto-failover.
+        async def _health_monitor() -> None:
+            while True:
+                await asyncio.sleep(1.0)
+                try:
+                    # Placeholder: coordinator.check_and_trigger_failover()
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Health monitor error: %s", exc)
+
+        monitor_task = asyncio.create_task(_health_monitor())
+
         yield
+
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
+
         logger.info("Coordinator shut down")
 
     app = FastAPI(title="DocStore Coordinator", version="0.1.0", lifespan=lifespan)
     app.state.coordinator = svc
     app.state.settings = settings
 
-    # ── Auth dependency for admin endpoints ───────────────────────────────────
+    # ── Auth dependencies ─────────────────────────────────────────────────────
 
     admin_auth = make_admin_auth_dependency(lambda: settings.ADMIN_TOKEN)
+    # C4: cluster_auth guards /register and /heartbeat (contracts §9)
+    cluster_auth = make_cluster_auth_dependency(lambda: settings.CLUSTER_SECRET)
 
     def get_service(request: Request) -> CoordinatorService:
         return request.app.state.coordinator  # type: ignore[no-any-return]
@@ -73,7 +97,7 @@ def build_coordinator_app(
         service = get_service(request)
         return service.shard_map
 
-    @app.post("/register")
+    @app.post("/register", dependencies=[Depends(cluster_auth)])
     async def register(
         body: NodeRegistration,
         request: Request,
@@ -84,7 +108,7 @@ def build_coordinator_app(
         except DocstoreError as exc:
             raise exc.to_http_exception() from exc
 
-    @app.post("/heartbeat")
+    @app.post("/heartbeat", dependencies=[Depends(cluster_auth)])
     async def heartbeat(
         body: Heartbeat,
         request: Request,

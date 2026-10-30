@@ -17,7 +17,7 @@ from docstore.common.models import (
 )
 
 WHITELIST_LOGICAL_OPS = frozenset({"$and", "$or"})
-WHITELIST_VALUE_OPS = frozenset({"$eq", "$gt", "$lt", "$in"})
+WHITELIST_VALUE_OPS = frozenset({"$eq", "$gt", "$gte", "$lt", "$lte", "$in"})
 WHITELIST_ALL_OPS = WHITELIST_LOGICAL_OPS | WHITELIST_VALUE_OPS
 
 
@@ -116,8 +116,8 @@ def validate_query_filter(filter_dict: Any) -> None:
                     raise InvalidQuery(
                         f"'$in' array size {len(val)} exceeds max allowed of {FILTER_IN_MAX_SIZE}."
                     )
-            elif op in ("$gt", "$lt"):
-                # Scalars only: int, float, str. Booleans are not allowed for $gt/$lt
+            elif op in ("$gt", "$gte", "$lt", "$lte"):
+                # Scalars only: int, float, str. Booleans are not allowed for comparison ops
                 if isinstance(val, bool) or not isinstance(val, (int, float, str)):
                     raise InvalidQuery(
                         f"Operator {op!r} requires numeric or string scalar, "

@@ -82,8 +82,8 @@ def _eval_operator(op: str, doc_val: Any, found: bool, target: Any) -> bool:
     Contracts:
     - Missing field never matches any operator.
     - null matches only an explicit null value.
-    - $gt / $lt compare only same-type scalars (number <-> number, string <-> string).
-      Booleans are NOT numbers.
+    - $gt / $gte / $lt / $lte compare only same-type scalars (number ↔ number,
+      string ↔ string).  Booleans are NOT numbers.
     """
     if not found:
         # A missing field never matches any operator
@@ -99,11 +99,25 @@ def _eval_operator(op: str, doc_val: Any, found: bool, target: Any) -> bool:
             return bool(doc_val > target)
         return False
 
+    if op == "$gte":
+        if is_number(doc_val) and is_number(target):
+            return bool(doc_val >= target)
+        if is_string(doc_val) and is_string(target):
+            return bool(doc_val >= target)
+        return False
+
     if op == "$lt":
         if is_number(doc_val) and is_number(target):
             return bool(doc_val < target)
         if is_string(doc_val) and is_string(target):
             return bool(doc_val < target)
+        return False
+
+    if op == "$lte":
+        if is_number(doc_val) and is_number(target):
+            return bool(doc_val <= target)
+        if is_string(doc_val) and is_string(target):
+            return bool(doc_val <= target)
         return False
 
     if op == "$in":

@@ -336,6 +336,8 @@ curl -X POST http://127.0.0.1:8000/query \
   }'
 ```
 
+Supported filter operators: `$eq`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$and`, `$or`.
+
 ### 5. Inspect Coordinator Status (`GET /admin/status`)
 
 Inspect lease states, replica states, terms, and shard health:

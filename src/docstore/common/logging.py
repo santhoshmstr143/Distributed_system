@@ -48,11 +48,11 @@ class _JsonFormatter(logging.Formatter):
 
         # Include exception TYPE only — never the full traceback in the JSON
         # value (it would expose internal paths and logic).  The raw traceback
-        # is still written to the stream by the handler's StreamHandler.emit()
-        # only if the log level is DEBUG.
+        # is emitted as exc_detail only for ERROR and above (M4 fix: was incorrectly
+        # restricted to DEBUG, leaving ERROR logs without a stack trace).
         if record.exc_info and record.exc_info[0] is not None:
             log_data["exc_type"] = record.exc_info[0].__name__
-            if record.levelno <= logging.DEBUG:
+            if record.levelno >= logging.ERROR:
                 log_data["exc_detail"] = self.formatException(record.exc_info)
 
         return json.dumps(log_data, ensure_ascii=False)

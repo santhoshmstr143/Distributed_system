@@ -405,15 +405,16 @@ async def _execute_write(
                 )
             state.follower_acked_seq = seq
 
-        # 9. Apply to memory state & record committed result in dedup table
-        if op == WriteOp.INSERT:
-            state.engine.insert(payload or {}, seq=seq)
-        elif op == WriteOp.UPDATE:
-            state.engine.update(payload or {}, seq=seq)
-        elif op == WriteOp.DELETE:
-            state.engine.delete(doc_id, seq=seq)
-
-        state.engine.last_applied_seq = seq
+        # 9. Apply to memory state via engine.apply() — unified idempotent codepath (M3)
+        apply_entry = {
+            "seq": seq,
+            "term": state.term,
+            "op": op.value,
+            "doc_id": doc_id,
+            "request_id": request_id,
+            "payload": payload,
+        }
+        state.engine.apply(apply_entry)
         result = {"outcome": WriteOutcome.COMMITTED, "seq": seq}
         state.engine.dedup_store(
             request_id,
@@ -739,15 +740,16 @@ def build_app(
                 request_id=body.request_id,
                 payload=body.payload,
             )
-            # 2. Apply asynchronously / directly to follower in-memory engine
-            if body.op == WriteOp.INSERT:
-                state.engine.insert(body.payload or {}, seq=body.seq)
-            elif body.op == WriteOp.UPDATE:
-                state.engine.update(body.payload or {}, seq=body.seq)
-            elif body.op == WriteOp.DELETE:
-                state.engine.delete(body.doc_id, seq=body.seq)
-
-            state.engine.last_applied_seq = body.seq
+            # 2. Apply via engine.apply() — idempotent; safe after crash-restart (C3)
+            repl_entry = {
+                "seq": body.seq,
+                "term": body.term,
+                "op": body.op.value,
+                "doc_id": body.doc_id,
+                "request_id": body.request_id,
+                "payload": body.payload,
+            }
+            state.engine.apply(repl_entry)
             state.primary_seq = body.seq
             state.engine.dedup_store(
                 body.request_id,
@@ -810,13 +812,22 @@ def build_app(
     async def apply_snapshot(body: dict[str, Any], request: Request) -> dict[str, Any]:
         state = get_node(request)
         async with state.write_lock():
-            docs = body.get("documents", [])
+            # C2: all_docs() returns dict[int, dict]; iterating the dict yields keys,
+            # not documents.  Handle both the dict format (current) and a list format
+            # (future-proofing) so the follower resync never crashes.
+            docs = body.get("documents", {})
             state.engine._docs.clear()
             state.engine._index.clear()
-            for doc in docs:
-                doc_id = doc["doc_id"]
-                state.engine._docs[doc_id] = doc
-                state.engine._index[doc_id] = None
+            if isinstance(docs, dict):
+                for doc_id_str, doc in docs.items():
+                    doc_id = int(doc_id_str)
+                    state.engine._docs[doc_id] = doc
+                    state.engine._index[doc_id] = None
+            else:  # list format (future-proofing)
+                for doc in docs:
+                    doc_id = doc["doc_id"]
+                    state.engine._docs[doc_id] = doc
+                    state.engine._index[doc_id] = None
             state.engine.last_applied_seq = body.get("last_applied_seq", 0)
             state.primary_seq = state.engine.last_applied_seq
             state.term = body.get("term", state.term)
@@ -831,8 +842,17 @@ def build_app(
     async def fence(body: dict[str, Any], request: Request) -> dict[str, Any]:
         state = get_node(request)
         new_term = body.get("term")
-        if new_term is not None and new_term > state.term:
-            state.term = new_term
+        # M6: Only accept exactly current_term+1 to prevent a misbehaving peer
+        # from jumping the term to max-int and permanently blocking replication.
+        if new_term is not None:
+            if new_term == state.term + 1:
+                state.term = new_term
+            elif new_term > state.term + 1:
+                logger.warning(
+                    "Fence rejected: term jump %d -> %d exceeds +1; ignoring.",
+                    state.term,
+                    new_term,
+                )
         return {"status": "ok", "term": state.term}
 
     @app.get("/internal/status", dependencies=[Depends(cluster_auth)])

@@ -11,6 +11,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -126,6 +127,8 @@ class ShardMapManager:
         self.path: Path | None = Path(path) if path else None
         self.history_log_path: Path | None = Path(history_log_path) if history_log_path else None
         self._shard_map: ShardMap | None = None
+        # L3: track last-saved content hash to avoid duplicate history entries
+        self._last_saved_hash: str | None = None
 
     @property
     def shard_map(self) -> ShardMap:
@@ -193,7 +196,15 @@ class ShardMapManager:
         self.path = target_path
 
         if append_history:
-            self._append_history_log(shard_map, target_path)
+            # L3: only append history when the map content actually changed
+            new_hash = hashlib.sha256(
+                json.dumps(
+                    json.loads(shard_map.model_dump_json()), sort_keys=True
+                ).encode()
+            ).hexdigest()
+            if new_hash != self._last_saved_hash:
+                self._append_history_log(shard_map, target_path)
+                self._last_saved_hash = new_hash
 
         logger.info("Saved shard map v%d atomically to %s", shard_map.map_version, target_path)
 

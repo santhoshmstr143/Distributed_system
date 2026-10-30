@@ -213,7 +213,14 @@ class CoordinatorService:
         for entry in current_map.entries:
             if entry.shard_id == shard_id:
                 if role == NodeRole.PRIMARY and entry.primary != reg.address:
-                    entry = entry.model_copy(update={"primary": reg.address})
+                    # H3: bump ownership_epoch so routers detect the address change
+                    # immediately via epoch staleness, not just after TTL expiry.
+                    entry = entry.model_copy(
+                        update={
+                            "primary": reg.address,
+                            "ownership_epoch": entry.ownership_epoch + 1,
+                        }
+                    )
                     map_changed = True
                 elif role == NodeRole.FOLLOWER and entry.follower != reg.address:
                     entry = entry.model_copy(update={"follower": reg.address})

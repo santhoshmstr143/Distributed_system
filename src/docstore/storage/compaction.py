@@ -54,7 +54,8 @@ def compact_wal(
         return 0
 
     # Decide the safe-to-delete threshold
-    gap = snapshot_seq - follower_acked_seq
+    # Cap at 0 so a follower ahead of the snapshot yields gap=0 (no retention issue).
+    gap = max(0, snapshot_seq - follower_acked_seq)
     if gap > WAL_RETENTION_CAP_ENTRIES:
         logger.warning(
             "Follower is %d entries behind (cap=%d); compacting to snapshot_seq=%d "
@@ -94,7 +95,10 @@ def compact_wal(
     # Write compacted WAL atomically
     tmp_path = wal_path.with_suffix(".wal.compact.tmp")
     tmp_path.write_bytes(b"".join(keep))
-    os.fsync(open(tmp_path, "rb").fileno())
+    # Use r+b (read-write) so that write-buffer flush is guaranteed on all
+    # platforms, and the `with` block ensures the FD is closed after fsync.
+    with open(tmp_path, "r+b") as _f:
+        os.fsync(_f.fileno())
     os.replace(tmp_path, wal_path)
     _fsync_dir(wal_path.parent)
 

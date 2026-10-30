@@ -58,6 +58,7 @@ class StorageEngine:
         self._dedup: dict[str, DedupEntry] = {}
         self._last_applied_seq: int = 0
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._write_count: int = 0  # used for periodic dedup eviction (M2)
 
     # ── Lock ──────────────────────────────────────────────────────────────────
 
@@ -189,12 +190,31 @@ class StorageEngine:
         return entry
 
     def dedup_store(self, request_id: str, entry: DedupEntry) -> None:
-        """Cache *entry* for *request_id*; evict oldest if over the size cap."""
+        """Cache *entry* for *request_id*; evict oldest if over the size cap.
+
+        Also runs a full TTL sweep every 1000 writes so that stale entries
+        don't accumulate unboundedly under sustained high-throughput (M2).
+        """
         self._dedup[request_id] = entry
-        # Evict oldest entries when over the cap
+        self._write_count += 1
+        # Proactive TTL sweep every 1000 stores (M2)
+        if self._write_count % 1_000 == 0:
+            self._evict_stale_dedup()
+        # Evict oldest entries when over the size cap
         while len(self._dedup) > _DEDUP_MAX_ENTRIES:
             oldest_key = next(iter(self._dedup))
             del self._dedup[oldest_key]
+
+    def _evict_stale_dedup(self) -> None:
+        """Proactively remove all dedup entries whose TTL has expired (M2)."""
+        now = time.monotonic()
+        stale_keys = [
+            rid
+            for rid, e in self._dedup.items()
+            if now - e.created_at > _DEDUP_TTL_S
+        ]
+        for rid in stale_keys:
+            del self._dedup[rid]
 
     def dedup_rebuild(self, entries: list[dict[str, Any]]) -> None:
         """Rebuild the dedup table from WAL entries (called during recovery)."""
