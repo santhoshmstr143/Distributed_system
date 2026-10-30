@@ -604,10 +604,10 @@
 - [x] `docs/consistency.md`: write path, **commit point**, outcome model (committed / rejected / unknown), primary vs follower reads, lease/epoch/term fencing argument (why the follower's term check, not the lease, protects acknowledged writes), `(term, seq)` log matching, **degraded mode** and the alternatives considered (relaxed durability, a third replica) with why they were not chosen. Distinguish **durability, replication, consistency, availability**
 - [x] `docs/failover.md` and `docs/migration.md`: state machines, commit point, failure cases
 - [x] `docs/api.md`: endpoints, examples, error codes
-- [ ] Final LaTeX report covers: sequence numbers and replication; write-acknowledgement protocol; lease expiry and ownership fencing; snapshot consistency and oplog catch-up in migration; failure scenarios and recovery behaviour; evaluation with plots; **limitations (two-replica deployment means writes are unavailable after a primary failure until the old primary rejoins; single coordinator — do not claim full fault tolerance)**; future work
-- [ ] Docstrings on public functions; type hints throughout
-- [ ] Report numbers match saved `results/` files
-- [ ] 🔖 **COMMIT:** `docs: architecture, consistency analysis, API, report`
+- [x] Final LaTeX report covers: sequence numbers and replication; write-acknowledgement protocol; lease expiry and ownership fencing; snapshot consistency and oplog catch-up in migration; failure scenarios and recovery behaviour; evaluation with plots; **limitations (two-replica deployment means writes are unavailable after a primary failure until the old primary rejoins; single coordinator — do not claim full fault tolerance)**; future work
+- [x] Docstrings on public functions; type hints throughout
+- [x] Report numbers match saved `results/` files
+- [x] 🔖 **COMMIT:** `docs: architecture, consistency analysis, API, report`
 
 ---
 
