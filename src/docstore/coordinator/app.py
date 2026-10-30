@@ -54,16 +54,14 @@ def build_coordinator_app(
             svc.shard_map.map_version,
         )
 
-        # H5: Background health monitor — checks for timed-out nodes every second.
-        # Extend coordinator.check_and_trigger_failover() in Module 8 for auto-failover.
+        # H5 / Module 8: Background health monitor — checks for timed-out nodes and auto-failovers.
         async def _health_monitor() -> None:
             while True:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(settings.HEARTBEAT_INTERVAL_S)
                 try:
-                    # Placeholder: coordinator.check_and_trigger_failover()
-                    pass
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Health monitor error: %s", exc)
+                    await svc.check_and_trigger_failover()
+                except Exception as exc:
+                    logger.warning("Health monitor failover check error: %s", exc)
 
         monitor_task = asyncio.create_task(_health_monitor())
 
@@ -129,6 +127,21 @@ def build_coordinator_app(
     async def admin_status(request: Request) -> dict[str, Any]:
         service = get_service(request)
         return service.get_cluster_status()
+
+    @app.post("/admin/failover/{shard_id}", dependencies=[Depends(admin_auth)])
+    async def admin_failover(shard_id: str, request: Request) -> dict[str, Any]:
+        """Manually trigger failover for a shard."""
+        service = get_service(request)
+        promoted = await service.trigger_failover(shard_id)
+        if not promoted:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "FAILOVER_FAILED",
+                    "error_message": f"Failover failed or blocked for shard {shard_id}.",
+                },
+            )
+        return {"status": "ok", "shard_id": shard_id, "promoted": True}
 
     @app.post("/admin/migrate", dependencies=[Depends(admin_auth)])
     async def admin_migrate() -> dict[str, str]:

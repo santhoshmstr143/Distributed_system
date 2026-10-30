@@ -392,61 +392,61 @@
 ## Module 8 — Failure Detection, Failover & Fencing  👤 Member 2 (lead), Member 1 (rejoin/resync)
 
 **Promotion procedure**
-1. [ ] Detect primary failure (no heartbeat for D)
-2. [ ] Verify the follower is alive and report its highest durable seq
-3. [ ] Follower finishes applying all valid durable WAL operations
-4. [ ] Wait until the old primary's lease has expired **plus the safety margin**
-5. [ ] Increment shard `term` and the `ownership_epoch` of every range of that shard
-6. [ ] Persist the shard map and epoch history durably
-7. [ ] Promote the follower (it persists the new term before serving)
-8. [ ] Allow writes only after the new ownership and a valid lease are in place
-9. [ ] Router refreshes on error and by periodic poll to the new `map_version`
+1. [x] Detect primary failure (no heartbeat for D)
+2. [x] Verify the follower is alive and report its highest durable seq
+3. [x] Follower finishes applying all valid durable WAL operations
+4. [x] Wait until the old primary's lease has expired **plus the safety margin**
+5. [x] Increment shard `term` and the `ownership_epoch` of every range of that shard
+6. [x] Persist the shard map and epoch history durably
+7. [x] Promote the follower (it persists the new term before serving)
+8. [x] Allow writes only after the new ownership and a valid lease are in place
+9. [x] Router refreshes on error and by periodic poll to the new `map_version`
 
 **Old primary / rejoin**
-- [ ] A returning primary **never** becomes primary from its previous state
-- [ ] It rejects writes carrying stale ownership information and demotes itself to follower
-- [ ] It finds the **divergence point** against the new primary's log using `(term, seq)` (the highest `seq` where both logs carry the same term), **truncates its own tail after that point**, rebuilds memory and the dedup table, and catches up; if that is impractical it falls back to a full snapshot resync
-- [ ] Its state goes `CATCHING_UP` → `SYNCED`; only then does the shard leave degraded mode
-- [ ] It resumes follower duty only after a successful resync
+- [x] A returning primary **never** becomes primary from its previous state
+- [x] It rejects writes carrying stale ownership information and demotes itself to follower
+- [x] It finds the **divergence point** against the new primary's log using `(term, seq)` (the highest `seq` where both logs carry the same term), **truncates its own tail after that point**, rebuilds memory and the dedup table, and catches up; if that is impractical it falls back to a full snapshot resync
+- [x] Its state goes `CATCHING_UP` → `SYNCED`; only then does the shard leave degraded mode
+- [x] It resumes follower duty only after a successful resync
 
 **Degraded mode after promotion** (two replicas only)
-- [ ] The promoted node serves reads immediately (primary reads need a valid lease)
-- [ ] Until a follower is `SYNCED`, writes are rejected with `REPLICATION_UNAVAILABLE`; synchronous replication is **not** relaxed (no single-node acknowledgements)
-- [ ] The returning old primary rejoins as a follower, resyncs, and becomes `SYNCED`; the shard then leaves degraded mode and accepts writes
-- [ ] Clients retry rejected writes using the same `request_id`
-- [ ] Restart of the failed node is automated for the demo and benchmarks (script or Docker restart policy) with a configurable delay
-- [ ] No migration on a degraded shard
+- [x] The promoted node serves reads immediately (primary reads need a valid lease)
+- [x] Until a follower is `SYNCED`, writes are rejected with `REPLICATION_UNAVAILABLE`; synchronous replication is **not** relaxed (no single-node acknowledgements)
+- [x] The returning old primary rejoins as a follower, resyncs, and becomes `SYNCED`; the shard then leaves degraded mode and accepts writes
+- [x] Clients retry rejected writes using the same `request_id`
+- [x] Restart of the failed node is automated for the demo and benchmarks (script or Docker restart policy) with a configurable delay
+- [x] No migration on a degraded shard
 
 **Sequence history across failover**
-- [ ] Committed positions are permanent and gap-free; the new primary continues from its own last committed `seq`
-- [ ] An uncommitted tail that exists only on the failed primary is discarded; those `seq` values are reassigned under the **higher `term`**, so `(term, seq)` stays unique
-- [ ] The new primary does not need to know about the discarded tail; the rejoining node reconciles it (divergence point above)
-- [ ] `request_id`s in a discarded tail count as never executed; a client retry runs them once under the new term
+- [x] Committed positions are permanent and gap-free; the new primary continues from its own last committed `seq`
+- [x] An uncommitted tail that exists only on the failed primary is discarded; those `seq` values are reassigned under the **higher `term`**, so `(term, seq)` stays unique
+- [x] The new primary does not need to know about the discarded tail; the rejoining node reconciles it (divergence point above)
+- [x] `request_id`s in a discarded tail count as never executed; a client retry runs them once under the new term
 
 **Other**
-- [ ] The follower's stale-`term` rejection is the fence that guarantees no acknowledged write is lost; the lease protects primary-read freshness (document both)
-- [ ] Timestamps recorded for **two metrics**: **failover time** (crash → detected → promoted → first successful primary read) and **write-restoration time** (crash → … → old primary restarted → `SYNCED` → first successful write; includes the configured restart delay). Report both; the report notes that this refines the proposal's single "first successful write" metric
-- [ ] Scope documented: **single-node (primary) failure only; coordinator is not fault-tolerant**
-- [ ] If the only remaining replica of a shard also fails, that shard is unavailable; documented limitation
-- [ ] **Test-only crash-point hooks** (named points; triggered by `ENABLE_TEST_HOOKS=true`; disabled and rejected in non-test config)
+- [x] The follower's stale-`term` rejection is the fence that guarantees no acknowledged write is lost; the lease protects primary-read freshness (document both)
+- [x] Timestamps recorded for **two metrics**: **failover time** (crash → detected → promoted → first successful primary read) and **write-restoration time** (crash → … → old primary restarted → `SYNCED` → first successful write; includes the configured restart delay). Report both; the report notes that this refines the proposal's single "first successful write" metric
+- [x] Scope documented: **single-node (primary) failure only; coordinator is not fault-tolerant**
+- [x] If the only remaining replica of a shard also fails, that shard is unavailable; documented limitation
+- [x] **Test-only crash-point hooks** (named points; triggered by `ENABLE_TEST_HOOKS=true`; disabled and rejected in non-test config)
 
 **Fault tests**
-- [ ] SIGKILL the primary at each point: (1) before WAL append, (2) after primary fsync, (3) after follower fsync but before ack, (4) after follower ack but before client ack, (5) after client ack
-- [ ] No acknowledged write lost; retrying the same `request_id` never duplicates
-- [ ] Stale primary rejected; double failover blocked; old primary rejoins as follower and resyncs
-- [ ] Crash after follower fsync but before follower ack → committed after failover; retry returns the original result
-- [ ] Crash before follower fsync → tail discarded; retry executes exactly once
-- [ ] While degraded: reads succeed, writes get `REPLICATION_UNAVAILABLE`; after rejoin and resync, writes succeed and the old primary's divergent tail is truncated
-- [ ] 🔖 **COMMIT:** `feat(failover): heartbeat detection, epoch-bumped promotion, fencing, rejoin`
+- [x] SIGKILL the primary at each point: (1) before WAL append, (2) after primary fsync, (3) after follower fsync but before ack, (4) after follower ack but before client ack, (5) after client ack
+- [x] No acknowledged write lost; retrying the same `request_id` never duplicates
+- [x] Stale primary rejected; double failover blocked; old primary rejoins as follower and resyncs
+- [x] Crash after follower fsync but before follower ack → committed after failover; retry returns the original result
+- [x] Crash before follower fsync → tail discarded; retry executes exactly once
+- [x] While degraded: reads succeed, writes get `REPLICATION_UNAVAILABLE`; after rejoin and resync, writes succeed and the old primary's divergent tail is truncated
+- [x] 🔖 **COMMIT:** `feat(failover): heartbeat detection, epoch-bumped promotion, fencing, rejoin`
 
 ### ✅ M5 GATE — Failover works
-- [ ] Continuous reader and writer running; SIGKILL a primary
-- [ ] New primary serves reads within the target window; term and epochs incremented
-- [ ] Writes are rejected with `REPLICATION_UNAVAILABLE` (never falsely acknowledged) while the shard is degraded
-- [ ] Old primary restarted → fenced, demoted, resynced, `SYNCED`; writes resume
-- [ ] Verification script: every acked `request_id` is present exactly once
-- [ ] Repeat 5+ times with no data loss
-- [ ] M5 tests green; lint clean
+- [x] Continuous reader and writer running; SIGKILL a primary
+- [x] New primary serves reads within the target window; term and epochs incremented
+- [x] Writes are rejected with `REPLICATION_UNAVAILABLE` (never falsely acknowledged) while the shard is degraded
+- [x] Old primary restarted → fenced, demoted, resynced, `SYNCED`; writes resume
+- [x] Verification script: every acked `request_id` is present exactly once
+- [x] Repeat 5+ times with no data loss
+- [x] M5 tests green; lint clean
 
 ---
 

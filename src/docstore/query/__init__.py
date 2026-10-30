@@ -9,7 +9,7 @@ from docstore.query.shard_key import (
     ShardKeyConstraint,
     detect_shard_key_constraint,
 )
-from docstore.query.sorter import extract_sort_key, sort_documents
+from docstore.query.sorter import sort_documents
 from docstore.query.validator import validate_query_filter
 
 __all__ = [

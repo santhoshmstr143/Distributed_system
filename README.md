@@ -340,12 +340,44 @@ Supported filter operators: `$eq`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$and`, 
 
 ### 5. Inspect Coordinator Status (`GET /admin/status`)
 
-Inspect lease states, replica states, terms, and shard health:
+Inspect lease states, replica states, terms, failover metrics, and shard health:
 
 ```bash
 curl -X GET http://127.0.0.1:8100/admin/status \
   -H "X-Admin-Token: coordinator-admin-token-32chars-min"
 ```
+
+---
+
+## Failover, Fencing & Degraded Mode (Module 8 / M5)
+
+### Promotion Procedure
+1. **Detection:** Coordinator detects primary failure if no heartbeat is received within timeout $D$ (default 5.0 s).
+2. **Follower Verification:** Coordinator checks that the follower is alive and queries its highest durable sequence number.
+3. **Safety Wait:** Coordinator waits for the failed primary's lease to expire plus a safety margin $M$ ($L + M$) before allowing promotion.
+4. **Term & Epoch Bump:** Shard `term` is incremented, and `ownership_epoch` for all ranges of that shard is bumped. The updated shard map and epoch history are saved durably to disk.
+5. **Promotion:** Follower is promoted to PRIMARY via `POST /internal/promote`, persisting the new term to disk.
+6. **Degraded Mode:** The newly promoted primary serves reads immediately (once granted a lease), but rejects writes with `503 REPLICATION_UNAVAILABLE` until a follower is `SYNCED`.
+
+### Old Primary Rejoin & Divergence Truncation
+- A returning failed primary never resumes as primary from past state.
+- When it restarts or contacts the coordinator, it is forced to role `FOLLOWER`.
+- It contacts the new primary via `POST /internal/divergence` to find the highest `(term, seq)` where both logs agree.
+- Any uncommitted tail beyond the divergence point is truncated from its WAL, and memory index + dedup tables are rebuilt.
+- It catches up remaining ops via `/internal/catchup` (or falls back to snapshot resync), marks itself `SYNCED`, and notifies the primary.
+- The shard leaves degraded mode and normal synchronous replication resumes.
+
+### Two Metrics Tracked
+- **Failover Time:** Crash detection → follower promotion → first successful primary read.
+- **Write-Restoration Time:** Crash detection → old primary restarted & resynced to `SYNCED` → first successful write.
+
+### Test Crash Hooks
+- Enabled via `ENABLE_TEST_HOOKS=true` for deterministic fault injection:
+  1. `before_wal_append`: SIGKILL before appending write to WAL.
+  2. `after_primary_fsync`: Crash after primary WAL fsync, before follower replication.
+  3. `after_follower_fsync_before_ack`: Crash after follower WAL fsync, before follower returns ACK.
+  4. `after_follower_ack_before_client_ack`: Crash after follower ACK, before client reply.
+  5. `after_client_ack`: Normal completion crash.
 
 ---
 
@@ -361,7 +393,7 @@ curl -X GET http://127.0.0.1:8100/admin/status \
 | **5** | ✅ Done | M3 Gate | Safe query filter engine, tie-breaking scatter-gather |
 | **6** | ✅ Done | M4 Gate | Central Coordinator, monotonic leases, epochs, heartbeats |
 | **7** | ✅ Done | M4 Gate | Sync durable replication, follower reads, catch-up, lag metrics |
-| **8** | ⬜ | M5 Gate | Failover detection, fencing & demotion/promotion |
+| **8** | ✅ Done | M5 Gate | Failover detection, fencing & demotion/promotion |
 | **9** | ⬜ | M6 Gate | Live range migration, cutover, catchup buffer |
 | **10–16** | ⬜ | M7 Gate | Python client SDK, Docker Compose, hardening, benchmarks, demo |
 
@@ -370,7 +402,8 @@ curl -X GET http://127.0.0.1:8100/admin/status \
 ## Known Limitations
 
 - **Coordinator Single-Point-of-Failure:** Coordinator is not fault-tolerant. If it fails, existing primary leases expire and writes halt until restored.
-- **Failover Restoration:** Writes are unavailable after a primary crash until the node restarts or the returning node catches up and enters `SYNCED`.
+- **Single-Node Failure Scope:** Failover supports single-node (primary) failure per shard. If both replicas of a shard fail simultaneously, that shard is unavailable.
+- **Degraded Mode Write Rejection:** Writes are rejected (`REPLICATION_UNAVAILABLE`) after failover until the rejoining replica achieves `SYNCED` state. Synchronous replication is never relaxed.
 - **Clock Assumptions:** Elapsed monotonic clock time is used locally for leases; cross-machine clock synchronization is not required.
 - **Single-Writer Shard Model:** One write at a time per shard lock to guarantee strict serializability and synchronous replication consistency.
 

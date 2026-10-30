@@ -198,9 +198,7 @@ class ShardMapManager:
         if append_history:
             # L3: only append history when the map content actually changed
             new_hash = hashlib.sha256(
-                json.dumps(
-                    json.loads(shard_map.model_dump_json()), sort_keys=True
-                ).encode()
+                json.dumps(json.loads(shard_map.model_dump_json()), sort_keys=True).encode()
             ).hexdigest()
             if new_hash != self._last_saved_hash:
                 self._append_history_log(shard_map, target_path)

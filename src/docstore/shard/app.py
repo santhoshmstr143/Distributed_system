@@ -89,6 +89,7 @@ from docstore.common.models import (
     WriteOutcome,
     WriteResponse,
 )
+from docstore.common.test_hooks import trigger_hook
 from docstore.query import (
     detect_shard_key_constraint,
     evaluate_filter,
@@ -147,6 +148,7 @@ class NodeState:
 
         # Lease & replication fields (Module 6 & 7)
         self.lease_expires_at: float = float("inf")
+        self.coordinator_url: str | None = None
         self.follower_url: str | None = None
         self.follower_state: ReplicaState = ReplicaState.SYNCED
         self.follower_acked_seq: int = 0
@@ -374,6 +376,14 @@ async def _execute_write(
             if doc_id not in state.engine._docs:
                 raise NotFound(f"doc_id={doc_id} not found.")
 
+        # Test hook 1: before WAL append
+        trigger_hook(
+            "before_wal_append",
+            state.settings.ENABLE_TEST_HOOKS,
+            request_id=request_id,
+            doc_id=doc_id,
+        )
+
         # 7. Assign sequence number & append to primary WAL (durable)
         assert state.wal is not None
         seq = state.wal.next_seq()
@@ -384,6 +394,15 @@ async def _execute_write(
             doc_id=doc_id,
             request_id=request_id,
             payload=payload,
+        )
+
+        # Test hook 2: after primary fsync
+        trigger_hook(
+            "after_primary_fsync",
+            state.settings.ENABLE_TEST_HOOKS,
+            request_id=request_id,
+            seq=seq,
+            doc_id=doc_id,
         )
 
         # 8. Synchronous replication to follower
@@ -421,9 +440,27 @@ async def _execute_write(
             DedupEntry(seq=seq, outcome=WriteOutcome.COMMITTED, result=result),
         )
 
+        # Test hook 4: after follower ack before client ack
+        trigger_hook(
+            "after_follower_ack_before_client_ack",
+            state.settings.ENABLE_TEST_HOOKS,
+            request_id=request_id,
+            seq=seq,
+            doc_id=doc_id,
+        )
+
         # 10. Final lease check before client reply
         if state.lease_expires_at != float("inf") and not state.is_lease_valid():
             raise OutcomeUnknown("Primary lease expired before client acknowledgement.")
+
+    # Test hook 5: after client ack
+    trigger_hook(
+        "after_client_ack",
+        state.settings.ENABLE_TEST_HOOKS,
+        request_id=request_id,
+        seq=seq,
+        doc_id=doc_id,
+    )
 
     return WriteResponse(
         outcome=WriteOutcome.COMMITTED,
@@ -431,6 +468,165 @@ async def _execute_write(
         seq=seq,
         meta=state.response_meta(doc_id),
     )
+
+
+# ── Rejoin & Resync Helper ────────────────────────────────────────────────────
+
+
+async def resync_with_primary(
+    state: NodeState,
+    primary_url: str,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Execute rejoin, divergence discovery, tail truncation and catch-up with new primary."""
+    clean_primary = primary_url.removeprefix("http://").removeprefix("https://").rstrip("/")
+    owns_client = False
+    client = http_client or state.http_client
+    if client is None:
+        client = httpx.AsyncClient(timeout=state.settings.REPLICATION_TIMEOUT_S + 2.0)
+        owns_client = True
+
+    try:
+        assert state.wal is not None
+        # 1. Collect local log entries (seq, term)
+        local_entries = [
+            {"seq": e["seq"], "term": e["term"]} for e in state.wal.replay(after_seq=0)
+        ]
+
+        # 2. Query divergence point
+        div_url = f"http://{clean_primary}/internal/divergence"
+        body_dict = {"shard_id": state.shard_id, "entries": local_entries}
+        body_bytes = json.dumps(body_dict, separators=(",", ":")).encode("utf-8")
+        sig = compute_signature(state.settings.CLUSTER_SECRET, body_bytes)
+        headers = {"Content-Type": "application/json", CLUSTER_SIG_HEADER: sig}
+
+        resp = await client.post(div_url, content=body_bytes, headers=headers)
+        if resp.status_code != 200:
+            logger.warning(
+                "Divergence check failed with status %d: %s", resp.status_code, resp.text
+            )
+            return False
+
+        div_data = resp.json()
+        needs_snapshot = div_data.get("needs_snapshot", False)
+        div_seq = div_data.get("divergence_seq", 0)
+
+        async with state.write_lock():
+            if needs_snapshot:
+                # Full snapshot resync
+                snap_url = f"http://{clean_primary}/internal/snapshot"
+                snap_sig = compute_signature(state.settings.CLUSTER_SECRET, b"")
+                snap_resp = await client.get(snap_url, headers={CLUSTER_SIG_HEADER: snap_sig})
+                if snap_resp.status_code != 200:
+                    logger.warning("Snapshot fetch failed: %d", snap_resp.status_code)
+                    return False
+                snap_data = snap_resp.json()
+                # Apply snapshot
+                state.engine._docs.clear()
+                state.engine._index.clear()
+                docs = snap_data.get("documents", {})
+                if isinstance(docs, dict):
+                    for did_str, d in docs.items():
+                        did = int(did_str)
+                        state.engine._docs[did] = d
+                        state.engine._index[did] = None
+                else:
+                    for d in docs:
+                        did = d["doc_id"]
+                        state.engine._docs[did] = d
+                        state.engine._index[did] = None
+                state.engine.last_applied_seq = snap_data.get("last_applied_seq", 0)
+                state.term = snap_data.get("term", state.term)
+                state.engine.dedup_import(snap_data.get("dedup_table", {}))
+                state.wal.truncate_after(state.engine.last_applied_seq)
+            else:
+                # Truncate divergent tail after div_seq
+                state.wal.truncate_after(div_seq)
+                # Rebuild in-memory engine and dedup up to div_seq
+                state.engine._docs.clear()
+                state.engine._index.clear()
+                state.engine._dedup.clear()
+                state.engine.last_applied_seq = 0
+                for entry in state.wal.replay(after_seq=0):
+                    state.engine.apply(entry)
+                    rid = entry.get("request_id")
+                    if rid:
+                        state.engine.dedup_store(
+                            rid,
+                            DedupEntry(
+                                seq=entry["seq"],
+                                outcome=WriteOutcome.COMMITTED,
+                                result={"outcome": WriteOutcome.COMMITTED, "seq": entry["seq"]},
+                            ),
+                        )
+
+                # Catchup missing entries with seq > div_seq
+                catchup_url = f"http://{clean_primary}/internal/catchup"
+                req_b = {"shard_id": state.shard_id, "after_seq": div_seq}
+                b_bytes = json.dumps(req_b, separators=(",", ":")).encode("utf-8")
+                c_sig = compute_signature(state.settings.CLUSTER_SECRET, b_bytes)
+                c_resp = await client.post(
+                    catchup_url,
+                    content=b_bytes,
+                    headers={
+                        "Content-Type": "application/json",
+                        CLUSTER_SIG_HEADER: c_sig,
+                    },
+                )
+                if c_resp.status_code == 200:
+                    c_data = c_resp.json()
+                    for entry in c_data.get("entries", []):
+                        state.wal.append(
+                            seq=entry["seq"],
+                            term=entry["term"],
+                            op=entry["op"],
+                            doc_id=entry["doc_id"],
+                            request_id=entry.get("request_id", ""),
+                            payload=entry.get("payload"),
+                        )
+                        state.engine.apply(entry)
+                        rid = entry.get("request_id")
+                        if rid:
+                            state.engine.dedup_store(
+                                rid,
+                                DedupEntry(
+                                    seq=entry["seq"],
+                                    outcome=WriteOutcome.COMMITTED,
+                                    result={"outcome": WriteOutcome.COMMITTED, "seq": entry["seq"]},
+                                ),
+                            )
+
+            # Inform primary of completion
+            state.role = NodeRole.FOLLOWER
+            state.primary_seq = div_data.get("last_seq", state.engine.last_applied_seq)
+            complete_url = f"http://{clean_primary}/internal/rejoin/complete"
+            comp_body = {
+                "shard_id": state.shard_id,
+                "node_id": state.node_id,
+                "last_applied_seq": state.engine.last_applied_seq,
+            }
+            comp_bytes = json.dumps(comp_body, separators=(",", ":")).encode("utf-8")
+            comp_sig = compute_signature(state.settings.CLUSTER_SECRET, comp_bytes)
+            await client.post(
+                complete_url,
+                content=comp_bytes,
+                headers={"Content-Type": "application/json", CLUSTER_SIG_HEADER: comp_sig},
+            )
+
+            logger.info(
+                "Resync complete for shard %s on node %s: caught up to seq %d",
+                state.shard_id,
+                state.node_id,
+                state.engine.last_applied_seq,
+            )
+            return True
+    except Exception as exc:
+        logger.warning("Resync with primary failed: %s", exc)
+        return False
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -448,6 +644,8 @@ def build_app(
     follower_url: str | None = None,
     follower_state: ReplicaState = ReplicaState.SYNCED,
     follower_transport: httpx.AsyncBaseTransport | None = None,
+    coordinator_url: str | None = None,
+    coordinator_transport: httpx.AsyncBaseTransport | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Factory: create and return the configured FastAPI shard-node app."""
@@ -461,6 +659,9 @@ def build_app(
         state.term = term
         state.follower_url = follower_url
         state.follower_state = follower_state
+
+        coord_url = coordinator_url or os.environ.get("COORDINATOR_URL")
+        state.coordinator_url = coord_url
 
         if lease_expires_at is not None:
             state.lease_expires_at = lease_expires_at
@@ -495,7 +696,60 @@ def build_app(
         except Exception as exc:
             node_logger.error("Recovery failed: %s", exc, exc_info=True)
 
+        # Background heartbeat sender task (Module 8 / H6)
+        async def _heartbeat_sender() -> None:
+            if not coord_url:
+                return
+            clean_coord = coord_url.removeprefix("http://").removeprefix("https://").rstrip("/")
+            url = f"http://{clean_coord}/heartbeat"
+            client_kwargs: dict[str, Any] = {"timeout": settings.HEARTBEAT_INTERVAL_S}
+            if coordinator_transport:
+                client_kwargs["transport"] = coordinator_transport
+            async with httpx.AsyncClient(**client_kwargs) as hb_client:
+                while True:
+                    await asyncio.sleep(settings.HEARTBEAT_INTERVAL_S)
+                    if state.role != NodeRole.PRIMARY:
+                        continue
+                    try:
+                        hb_data = {
+                            "node_id": state.node_id,
+                            "shard_id": state.shard_id,
+                            "role": state.role.value,
+                            "term": state.term,
+                            "last_applied_seq": state.engine.last_applied_seq,
+                            "follower_acked_seq": state.follower_acked_seq,
+                            "follower_state": state.follower_state.value,
+                            "timestamp_monotonic": time.monotonic(),
+                        }
+                        body_b = json.dumps(hb_data, separators=(",", ":")).encode("utf-8")
+                        sig = compute_signature(settings.CLUSTER_SECRET, body_b)
+                        headers = {"Content-Type": "application/json", CLUSTER_SIG_HEADER: sig}
+                        resp = await hb_client.post(url, content=body_b, headers=headers)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data and "granted_at" in data and "expires_at" in data:
+                                duration = data["expires_at"] - data["granted_at"]
+                                state.lease_expires_at = time.monotonic() + (
+                                    duration if duration > 0 else settings.LEASE_DURATION_S
+                                )
+                        elif resp.status_code == 409:
+                            node_logger.warning(
+                                "Heartbeat returned 409 STALE_TERM; demoting to follower"
+                            )
+                            state.role = NodeRole.FOLLOWER
+                            state.lease_expires_at = 0.0
+                    except Exception as exc:
+                        node_logger.debug("Heartbeat sending failed: %s", exc)
+
+        hb_task = asyncio.create_task(_heartbeat_sender())
+
         yield
+
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
 
         if owns_client and state.http_client:
             await state.http_client.aclose()
@@ -740,6 +994,14 @@ def build_app(
                 request_id=body.request_id,
                 payload=body.payload,
             )
+            # Test hook 3: after follower fsync before ack
+            trigger_hook(
+                "after_follower_fsync_before_ack",
+                state.settings.ENABLE_TEST_HOOKS,
+                request_id=body.request_id,
+                seq=body.seq,
+                doc_id=body.doc_id,
+            )
             # 2. Apply via engine.apply() — idempotent; safe after crash-restart (C3)
             repl_entry = {
                 "seq": body.seq,
@@ -866,6 +1128,111 @@ def build_app(
             "last_applied_seq": state.engine.last_applied_seq,
             "doc_count": state.engine.doc_count(),
         }
+
+    @app.post("/internal/promote", dependencies=[Depends(cluster_auth)])
+    async def promote(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        async with state.write_lock():
+            new_term = body.get("term", state.term + 1)
+            state.term = new_term
+            state.role = NodeRole.PRIMARY
+
+            epochs = body.get("ownership_epochs", {})
+            for r in state.ranges:
+                key = f"{r.start}-{r.end}"
+                if key in epochs:
+                    r.ownership_epoch = epochs[key]
+                else:
+                    r.ownership_epoch += 1
+
+            lease = body.get("lease")
+            if lease:
+                duration = lease.get("expires_at", 0) - lease.get("granted_at", 0)
+                state.lease_expires_at = time.monotonic() + (
+                    duration if duration > 0 else state.settings.LEASE_DURATION_S
+                )
+            else:
+                state.lease_expires_at = time.monotonic() + state.settings.LEASE_DURATION_S
+
+            state.follower_url = body.get("follower_url")
+            state.follower_state = (
+                ReplicaState.DOWN
+            )  # Degraded mode until rejoining follower is SYNCED
+
+            # Replay any unapplied durable WAL entries
+            if state.wal:
+                for entry in state.wal.replay(after_seq=state.engine.last_applied_seq):
+                    state.engine.apply(entry)
+                    rid = entry.get("request_id")
+                    if rid:
+                        state.engine.dedup_store(
+                            rid,
+                            DedupEntry(
+                                seq=entry["seq"],
+                                outcome=WriteOutcome.COMMITTED,
+                                result={"outcome": WriteOutcome.COMMITTED, "seq": entry["seq"]},
+                            ),
+                        )
+
+            logger.info(
+                "Promoted node %s to PRIMARY for shard %s in term %d (degraded mode)",
+                state.node_id,
+                state.shard_id,
+                state.term,
+            )
+            return {
+                "status": "ok",
+                "node_id": state.node_id,
+                "role": "primary",
+                "term": state.term,
+                "last_applied_seq": state.engine.last_applied_seq,
+            }
+
+    @app.post("/internal/divergence", dependencies=[Depends(cluster_auth)])
+    async def get_divergence_point(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        assert state.wal is not None
+
+        entries = body.get("entries", [])
+        earliest = state.wal.earliest_seq() or 1
+        local_entries = {e["seq"]: e["term"] for e in state.wal.replay(after_seq=0)}
+
+        candidate_divergence = 0
+        needs_snapshot = False
+
+        for item in entries:
+            s = item.get("seq", 0)
+            t = item.get("term", 0)
+            if s in local_entries and local_entries[s] == t:
+                if s > candidate_divergence:
+                    candidate_divergence = s
+
+        if entries and candidate_divergence == 0 and entries[0].get("seq", 0) < earliest:
+            needs_snapshot = True
+
+        return {
+            "status": "ok",
+            "divergence_seq": candidate_divergence,
+            "last_seq": state.wal.last_seq,
+            "needs_snapshot": needs_snapshot,
+        }
+
+    @app.post("/internal/rejoin/complete", dependencies=[Depends(cluster_auth)])
+    async def rejoin_complete(body: dict[str, Any], request: Request) -> dict[str, Any]:
+        state = get_node(request)
+        async with state.write_lock():
+            follower_url = body.get("follower_url")
+            if follower_url:
+                state.follower_url = follower_url
+            state.follower_state = ReplicaState.SYNCED
+            follower_seq = body.get("last_applied_seq", state.wal.last_seq if state.wal else 0)
+            state.follower_acked_seq = max(state.follower_acked_seq, follower_seq)
+            logger.info(
+                "Follower rejoin complete for shard %s: follower_url=%s, state=SYNCED",
+                state.shard_id,
+                state.follower_url,
+            )
+            return {"status": "ok", "follower_state": "SYNCED"}
 
     # ── Error handler ─────────────────────────────────────────────────────────
 

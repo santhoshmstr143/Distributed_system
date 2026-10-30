@@ -208,11 +208,7 @@ class StorageEngine:
     def _evict_stale_dedup(self) -> None:
         """Proactively remove all dedup entries whose TTL has expired (M2)."""
         now = time.monotonic()
-        stale_keys = [
-            rid
-            for rid, e in self._dedup.items()
-            if now - e.created_at > _DEDUP_TTL_S
-        ]
+        stale_keys = [rid for rid, e in self._dedup.items() if now - e.created_at > _DEDUP_TTL_S]
         for rid in stale_keys:
             del self._dedup[rid]
 
