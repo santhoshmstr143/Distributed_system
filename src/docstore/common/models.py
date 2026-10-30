@@ -327,3 +327,11 @@ class ErrorResponse(BaseModel):
 
     error_code: str
     error_message: str
+
+
+class QueryResponse(BaseModel):
+    """Response returned for a POST /query request."""
+
+    documents: list[dict[str, Any]]
+    total: int
+    meta: ResponseMeta | None = None

@@ -30,14 +30,18 @@ from docstore.common.auth import (
     verify_token,
 )
 from docstore.common.config import Settings
-from docstore.common.errors import OutOfRange
+from docstore.common.errors import InvalidQuery, OutOfRange
 from docstore.common.logging import get_logger
 from docstore.common.models import (
     DOC_ID_MAX,
     DOC_ID_MIN,
     Document,
+    QueryFilter,
+    QueryResponse,
     ShardMapEntry,
 )
+from docstore.query import validate_query_filter
+from docstore.router.scatter import execute_scatter_query
 from docstore.router.shard_map import ShardMapManager
 
 logger = get_logger(__name__)
@@ -371,6 +375,24 @@ def build_router_app(
             method="GET",
             path=f"/doc/{doc_id}",
             body_dict=None,
+        )
+
+    @app.post("/query")
+    async def query_docs(
+        body: QueryFilter,
+        request: Request,
+    ) -> QueryResponse:
+        _verify_client_auth(request.headers.get(CLIENT_KEY_HEADER))
+        try:
+            validate_query_filter(body.filter)
+        except InvalidQuery as exc:
+            raise exc.to_http_exception() from exc
+
+        return await execute_scatter_query(
+            query=body,
+            map_mgr=request.app.state.map_mgr,
+            http_client=request.app.state.http_client,
+            settings=request.app.state.settings,
         )
 
     @app.get("/health")

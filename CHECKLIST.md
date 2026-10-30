@@ -272,40 +272,40 @@
 ## Module 5 — Query Engine & Scatter-Gather  👤 Member 3
 
 ### 5.1 Query engine (`query/`)
-- [ ] Grammar: `{field: value}`, `{field: {$eq,$gt,$lt,$in}}`, `{$and: [...]}`, `{$or: [...]}`
-- [ ] **Validator:** whitelist operators, max depth, max clauses, max `$in` size, reject unknown `$` operators
-- [ ] **Evaluator:** pure Python; **no `eval` / `exec` / `pickle` / user regex**
-- [ ] Dotted-path access for nested fields; missing-field and null rules from the contracts
-- [ ] Type-safe comparison per the contracts (bool is not a number)
-- [ ] `sort` using the total order from the contracts, `doc_id` tie-break; `limit` / `skip` caps
-- [ ] Shard-key detection helper: does the filter pin `doc_id` (eq / `$in` / range)?
-- [ ] **Tests:** every operator, nested and/or, missing/null/type-mismatch, sort order across mixed types, malicious/oversized filters
+- [x] Grammar: `{field: value}`, `{field: {$eq,$gt,$lt,$in}}`, `{$and: [...]}`, `{$or: [...]}`
+- [x] **Validator:** whitelist operators, max depth, max clauses, max `$in` size, reject unknown `$` operators
+- [x] **Evaluator:** pure Python; **no `eval` / `exec` / `pickle` / user regex**
+- [x] Dotted-path access for nested fields; missing-field and null rules from the contracts
+- [x] Type-safe comparison per the contracts (bool is not a number)
+- [x] `sort` using the total order from the contracts, `doc_id` tie-break; `limit` / `skip` caps
+- [x] Shard-key detection helper: does the filter pin `doc_id` (eq / `$in` / range)?
+- [x] **Tests:** every operator, nested and/or, missing/null/type-mismatch, sort order across mixed types, malicious/oversized filters (23/23 passing)
 
 ### 5.2 Shard `/query` endpoint
-- [ ] `POST /query` using the evaluator; uses the ordered index when `doc_id` is constrained
-- [ ] Returns **only documents in ranges the shard currently owns** (excludes migrating-out or not-yet-cut-over data)
-- [ ] **Tests:** single-shard queries, ownership filtering
+- [x] `POST /query` using the evaluator; uses the ordered index when `doc_id` is constrained
+- [x] Returns **only documents in ranges the shard currently owns** (excludes migrating-out or not-yet-cut-over data)
+- [x] **Tests:** single-shard queries, ownership filtering
 
 ### 5.3 Router scatter-gather
-- [ ] Shard-key filters → direct to one shard (`$in` grouped per shard; range → only overlapping shards)
-- [ ] Non-key filters → parallel `asyncio.gather` to all shards with a per-shard timeout
-- [ ] **Merge (correct pagination):**
+- [x] Shard-key filters → direct to one shard (`$in` grouped per shard; range → only overlapping shards)
+- [x] Non-key filters → parallel `asyncio.gather` to all shards with a per-shard timeout
+- [x] **Merge (correct pagination):**
   1. Ask each shard for up to `skip + limit` sorted candidates with **local skip = 0**
   2. Merge sorted streams (e.g., `heapq.merge`)
   3. De-duplicate by `doc_id`
   4. Apply global `skip`, then global `limit`
   5. `doc_id` is the tie-breaker
-- [ ] Router drops any result whose `doc_id` is outside the responding shard's range per the router's map
-- [ ] **Partial-failure policy:** if any required shard fails or times out → **fail the whole query**, return an error naming the unavailable shard, allow one bounded retry; never return silently incomplete results
-- [ ] `read_mode` plumbing (`primary` default; `follower` accepted once followers exist)
-- [ ] **Tests:** global pagination correctness over 3 shards (skip crossing shard boundaries), tie-breaking, dedup, timeouts, partial failure
-- [ ] 🔖 **COMMIT:** `feat(query): safe filter engine and router scatter-gather`
+- [x] Router drops any result whose `doc_id` is outside the responding shard's range per the router's map
+- [x] **Partial-failure policy:** if any required shard fails or times out → **fail the whole query**, return an error naming the unavailable shard, allow one bounded retry; never return silently incomplete results
+- [x] `read_mode` plumbing (`primary` default; `follower` accepted once followers exist)
+- [x] **Tests:** global pagination correctness over 3 shards (skip crossing shard boundaries), tie-breaking, dedup, timeouts, partial failure (6/6 passing)
+- [x] 🔖 **COMMIT:** `feat(query): safe filter engine and router scatter-gather`
 
 ### ✅ M3 GATE — Queries work
-- [ ] Key lookup and shard-key query hit exactly one shard (verify via logs/metrics)
-- [ ] Non-key filter hits all shards; merged, sorted, paginated, de-duplicated results match a single-node reference
-- [ ] Malicious/oversized filters rejected cleanly
-- [ ] M3 tests green; lint clean
+- [x] Key lookup and shard-key query hit exactly one shard (verify via logs/metrics)
+- [x] Non-key filter hits all shards; merged, sorted, paginated, de-duplicated results match a single-node reference
+- [x] Malicious/oversized filters rejected cleanly
+- [x] M3 tests green; lint clean
 
 ---
 

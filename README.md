@@ -88,7 +88,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming and commit conventions.
 | 2  | ✅ Done | Storage engine (WAL, snapshots, index) |
 | 3  | ✅ Done | Basic shard node API |
 | 4  | ✅ Done | Static shard map & router |
-| 5  | ⬜ | Query engine & scatter-gather |
+| 5  | ✅ Done | Query engine & scatter-gather |
 | 6  | ⬜ | Coordinator, epochs, leases |
 | 7  | ⬜ | Replication (primary → follower) |
 | 8  | ⬜ | Failover & fencing |

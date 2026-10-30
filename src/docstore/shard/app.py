@@ -42,17 +42,25 @@ from pydantic import BaseModel, Field
 
 from docstore.common.auth import make_cluster_auth_dependency
 from docstore.common.config import Settings
-from docstore.common.errors import DuplicateKey, NotFound, OutOfRange
+from docstore.common.errors import DuplicateKey, InvalidQuery, NotFound, OutOfRange
 from docstore.common.logging import get_logger
 from docstore.common.models import (
     DOC_ID_MIN,
     Document,
     NodeRole,
+    QueryFilter,
+    QueryResponse,
     ReadResponse,
     ResponseMeta,
     WriteOp,
     WriteOutcome,
     WriteResponse,
+)
+from docstore.query import (
+    detect_shard_key_constraint,
+    evaluate_filter,
+    sort_documents,
+    validate_query_filter,
 )
 from docstore.storage.engine import DedupEntry, StorageEngine
 from docstore.storage.snapshot import SnapshotManager
@@ -424,6 +432,58 @@ def build_app(
         return ReadResponse(
             document=Document.model_validate(doc),
             meta=state.response_meta(doc_id),
+        )
+
+    @app.post("/query")
+    async def query_docs(body: QueryFilter, request: Request) -> QueryResponse:
+        state = get_node(request)
+        try:
+            validate_query_filter(body.filter)
+        except InvalidQuery as exc:
+            raise exc.to_http_exception() from exc
+
+        # Collect candidate documents according to shard-key constraints & ownership
+        constraint = detect_shard_key_constraint(body.filter)
+        candidates: list[dict[str, Any]] = []
+
+        if constraint.kind == "exact":
+            assert constraint.doc_id is not None
+            if state.owns(constraint.doc_id):
+                doc = state.engine.get(constraint.doc_id)
+                if doc is not None:
+                    candidates.append(doc)
+        elif constraint.kind == "in":
+            for doc_id in constraint.doc_ids or []:
+                if state.owns(doc_id):
+                    doc = state.engine.get(doc_id)
+                    if doc is not None:
+                        candidates.append(doc)
+        elif constraint.kind == "range":
+            assert constraint.range_start is not None and constraint.range_end is not None
+            for r in state.ranges:
+                s = max(constraint.range_start, r.start)
+                e = min(constraint.range_end, r.end)
+                if s < e:
+                    candidates.extend(state.engine.range_scan(s, e))
+        else:
+            # All ranges owned by this shard
+            for r in state.ranges:
+                candidates.extend(state.engine.range_scan(r.start, r.end))
+
+        # Evaluate filter
+        matched = [doc for doc in candidates if evaluate_filter(doc, body.filter)]
+
+        # Sort
+        sorted_docs = sort_documents(matched, sort_field=body.sort_field, sort_dir=body.sort_dir)
+
+        # Pagination
+        total = len(sorted_docs)
+        paginated = sorted_docs[body.skip : body.skip + body.limit]
+
+        return QueryResponse(
+            documents=paginated,
+            total=total,
+            meta=state.response_meta(),
         )
 
     @app.get("/health")
