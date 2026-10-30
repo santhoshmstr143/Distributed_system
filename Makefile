@@ -73,7 +73,7 @@ check: lint-check typecheck security audit test-fast   ## Run all quality gates
 # ── Application tasks ────────────────────────────────────────────────────────
 .PHONY: demo
 demo:            ## Run the scripted end-to-end demo
-	@echo "⚠  Demo not yet implemented (Module 14)."
+	PYTHONPATH=src $(VENV)/bin/python scripts/demo.py
 
 .PHONY: bench
 bench:           ## Run performance benchmarks and generate figures

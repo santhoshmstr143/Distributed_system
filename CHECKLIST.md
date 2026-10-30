@@ -582,18 +582,18 @@
 
 ## Module 14 — Scripted Demo  👤 All
 
-- [ ] `make demo` runs the full story with clear printed steps
-- [ ] Step 1: start the cluster, load data across 3 shards, show the shard map
-- [ ] Step 2: key lookup (direct) vs filter query (scatter-gather) with timings
-- [ ] Step 3: start continuous read and write workloads; **record every acknowledged write by `request_id`** for later verification
-- [ ] Step 4: **SIGKILL a primary** → detection and promotion, new term/epoch; show that **reads continue** and that writes are **temporarily rejected** (`REPLICATION_UNAVAILABLE`) because the new primary has no follower
-- [ ] Step 5: **restart the old primary** → it is **fenced** (rejects writes), resyncs, rejoins as follower, becomes `SYNCED`; writes **resume**
-- [ ] Verify: every acked write present, none duplicated, old primary could not accept writes, new primary serves requests
-- [ ] Step 6: **migrate a key range** while writes continue → pause duration + integrity check
-- [ ] Step 7: **follower read lags** behind a primary read (tagged stale)
-- [ ] Step 8: print a metrics summary
-- [ ] Record a backup screen recording; rehearse at least twice on a clean machine
-- [ ] 🔖 **COMMIT:** `feat(demo): scripted end-to-end demo`
+- [x] `make demo` runs the full story with clear printed steps
+- [x] Step 1: start the cluster, load data across 3 shards, show the shard map
+- [x] Step 2: key lookup (direct) vs filter query (scatter-gather) with timings
+- [x] Step 3: start continuous read and write workloads; **record every acknowledged write by `request_id`** for later verification
+- [x] Step 4: **SIGKILL a primary** → detection and promotion, new term/epoch; show that **reads continue** and that writes are **temporarily rejected** (`REPLICATION_UNAVAILABLE`) because the new primary has no follower
+- [x] Step 5: **restart the old primary** → it is **fenced** (rejects writes), resyncs, rejoins as follower, becomes `SYNCED`; writes **resume**
+- [x] Verify: every acked write present, none duplicated, old primary could not accept writes, new primary serves requests
+- [x] Step 6: **migrate a key range** while writes continue → pause duration + integrity check
+- [x] Step 7: **follower read lags** behind a primary read (tagged stale)
+- [x] Step 8: print a metrics summary
+- [x] Record a backup screen recording; rehearse at least twice on a clean machine
+- [x] 🔖 **COMMIT:** `feat(demo): scripted end-to-end demo`
 
 ---
 
