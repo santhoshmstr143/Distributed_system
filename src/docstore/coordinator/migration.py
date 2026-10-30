@@ -524,6 +524,8 @@ class MigrationManager:
                     rec.state = MigrationState.CLEANUP
                     self.save_record(rec)
 
+                    recovery_errors: list[str] = []
+
                     if dest_entry and dest_entry.primary:
                         try:
                             await _rpc(
@@ -535,9 +537,9 @@ class MigrationManager:
                                 },
                             )
                         except Exception as exc:
-                            logger.warning(
-                                "Cutover RPC to dest primary failed during recovery: %s", exc
-                            )
+                            err = f"Cutover RPC to dest primary {dest_entry.primary} failed: {exc}"
+                            logger.warning("%s", err)
+                            recovery_errors.append(err)
 
                     if dest_entry and dest_entry.follower:
                         try:
@@ -550,9 +552,11 @@ class MigrationManager:
                                 },
                             )
                         except Exception as exc:
-                            logger.warning(
-                                "Cutover RPC to dest follower failed during recovery: %s", exc
+                            err = (
+                                f"Cutover RPC to dest follower {dest_entry.follower} failed: {exc}"
                             )
+                            logger.warning("%s", err)
+                            recovery_errors.append(err)
 
                     if src_entry and src_entry.primary:
                         try:
@@ -561,21 +565,34 @@ class MigrationManager:
                                 {"start": rec.range_start, "end": rec.range_end},
                             )
                         except Exception as exc:
-                            logger.warning(
-                                "Cleanup RPC to src primary failed during recovery: %s", exc
-                            )
+                            err = f"Cleanup RPC to src primary {src_entry.primary} failed: {exc}"
+                            logger.warning("%s", err)
+                            recovery_errors.append(err)
 
-                    rec.state = MigrationState.DONE
-                    self.save_record(rec)
-                    recovered_records.append(rec)
-                    logger.info(
-                        "Migration %s successfully rolled forward to DONE",
-                        rec.migration_id,
-                    )
+                    if recovery_errors:
+                        rec.state = MigrationState.CLEANUP
+                        rec.error = "; ".join(recovery_errors)
+                        self.save_record(rec)
+                        logger.warning(
+                            "Migration %s recovery incomplete: %s; retained in CLEANUP for retry",
+                            rec.migration_id,
+                            rec.error,
+                        )
+                    else:
+                        rec.state = MigrationState.DONE
+                        rec.error = None
+                        self.save_record(rec)
+                        recovered_records.append(rec)
+                        logger.info(
+                            "Migration %s successfully rolled forward to DONE",
+                            rec.migration_id,
+                        )
 
                 else:
                     # Before cutover: safely abort
                     logger.info("Migration %s is before cutover; safely aborting", rec.migration_id)
+                    abort_errors: list[str] = []
+
                     if src_entry and src_entry.primary:
                         try:
                             await _rpc(
@@ -583,9 +600,9 @@ class MigrationManager:
                                 {"start": rec.range_start, "end": rec.range_end},
                             )
                         except Exception as exc:
-                            logger.warning(
-                                "Unpause RPC to src primary failed during abort: %s", exc
-                            )
+                            err = f"Unpause RPC to src primary {src_entry.primary} failed: {exc}"
+                            logger.warning("%s", err)
+                            abort_errors.append(err)
 
                     if dest_entry and dest_entry.primary:
                         try:
@@ -594,13 +611,25 @@ class MigrationManager:
                                 {"start": rec.range_start, "end": rec.range_end},
                             )
                         except Exception as exc:
-                            logger.warning("Abort RPC to dest primary failed during abort: %s", exc)
+                            err = f"Abort RPC to dest primary {dest_entry.primary} failed: {exc}"
+                            logger.warning("%s", err)
+                            abort_errors.append(err)
 
-                    rec.state = MigrationState.ABORTED
-                    rec.error = "Aborted automatically on coordinator restart (pre-cutover)."
-                    self.save_record(rec)
-                    recovered_records.append(rec)
-                    logger.info("Migration %s aborted successfully", rec.migration_id)
+                    if abort_errors:
+                        rec.error = "; ".join(abort_errors)
+                        self.save_record(rec)
+                        logger.warning(
+                            "Migration %s abort incomplete: %s; retained in %s for retry",
+                            rec.migration_id,
+                            rec.error,
+                            rec.state,
+                        )
+                    else:
+                        rec.state = MigrationState.ABORTED
+                        rec.error = "Aborted automatically on coordinator restart (pre-cutover)."
+                        self.save_record(rec)
+                        recovered_records.append(rec)
+                        logger.info("Migration %s aborted successfully", rec.migration_id)
 
         finally:
             if owns_client:

@@ -249,13 +249,12 @@ async def _recover(state: NodeState) -> None:
 
     # 1. Load durable node metadata if present
     meta_path = data_dir / "node_metadata.json"
+    is_disk_recovery = meta_path.exists()
     if meta_path.exists():
         try:
             with open(meta_path, encoding="utf-8") as f:
                 meta = json.load(f)
                 state.term = meta.get("term", state.term)
-                if "role" in meta:
-                    state.role = NodeRole(meta["role"])
                 if "ranges" in meta and not state.ranges:
                     for r in meta["ranges"]:
                         state.ranges.append(ShardRangeConfig(**r))
@@ -303,6 +302,12 @@ async def _recover(state: NodeState) -> None:
                     result={"outcome": WriteOutcome.COMMITTED, "seq": entry["seq"]},
                 ),
             )
+
+    if is_disk_recovery or snap is not None or wal_entries or wal.last_seq > 0:
+        # A node recovering from disk must NOT restore primary authority.
+        # It must start in a fenced/recovering, non-authoritative follower state.
+        state.role = NodeRole.FOLLOWER
+        state.lease_expires_at = 0.0
 
     _persist_node_metadata(state)
 
@@ -379,16 +384,24 @@ async def _replicate_to_follower(
 async def _reconcile_pending_write(state: NodeState, request_id: str) -> WriteOutcome:
     """Ask follower whether the pending operation was durably stored and resolve state.
 
-    - If the follower has the operation durably, apply it on the primary and mark it COMMITTED.
-    - If the follower does not have it, resolve it as uncommitted and allow retry to execute safely.
+    Protocol rules:
+    - Operation identity is (term, seq, request_id).
+    - If follower has operation with matching identity -> Mark COMMITTED.
+    - If follower is behind (wal_last_seq < seq) -> Keep unresolved (OUTCOME_UNKNOWN).
+    - If follower is unreachable or error occurs -> Keep unresolved (OUTCOME_UNKNOWN).
+    - If authoritative log reconciliation proves operation is absent (wal_last_seq >= seq
+      and follower's log at seq has a conflicting entry or definitively lacks the operation)
+      -> Resolve as uncommitted (remove from pending_unresolved_writes and dedup table).
     """
     if not state.follower_url:
         return WriteOutcome.OUTCOME_UNKNOWN
 
     pending = state.pending_unresolved_writes.get(request_id)
     seq: int | None = None
+    term: int = state.term
     if pending:
         seq = pending.get("seq")
+        term = pending.get("term", state.term)
     else:
         dedup = state.engine.dedup_check(request_id)
         if dedup:
@@ -399,7 +412,7 @@ async def _reconcile_pending_write(state: NodeState, request_id: str) -> WriteOu
 
     clean_url = state.follower_url.removeprefix("http://").removeprefix("https://").rstrip("/")
     url = f"http://{clean_url}/internal/check-op"
-    payload = {"seq": seq, "request_id": request_id}
+    payload = {"term": term, "seq": seq, "request_id": request_id}
     body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     sig = compute_signature(state.settings.CLUSTER_SECRET, body_bytes)
     headers = {
@@ -422,11 +435,22 @@ async def _reconcile_pending_write(state: NodeState, request_id: str) -> WriteOu
         )
         if resp.status_code == 200:
             data = resp.json()
-            if data.get("has_op"):
+            has_op = data.get("has_op", False)
+            wal_last_seq = data.get("wal_last_seq", 0)
+            op_term = data.get("op_term")
+            op_request_id = data.get("op_request_id")
+            entry_found = data.get("entry_found", False)
+
+            # 1. Durably present with matching identity: mark committed
+            if (
+                has_op
+                and (op_term is None or op_term == term)
+                and (op_request_id is None or op_request_id == request_id)
+            ):
                 if pending:
                     apply_entry = {
                         "seq": seq,
-                        "term": pending.get("term", state.term),
+                        "term": term,
                         "op": pending["op"],
                         "doc_id": pending["doc_id"],
                         "request_id": request_id,
@@ -443,13 +467,39 @@ async def _reconcile_pending_write(state: NodeState, request_id: str) -> WriteOu
                 )
                 state.pending_unresolved_writes.pop(request_id, None)
                 state.follower_acked_seq = max(state.follower_acked_seq, seq)
-                logger.info("Pending write %s (seq=%d) reconciled as COMMITTED", request_id, seq)
+                logger.info(
+                    "Pending write %s (term=%d, seq=%d) reconciled as COMMITTED",
+                    request_id,
+                    term,
+                    seq,
+                )
                 return WriteOutcome.COMMITTED
-            else:
-                state.pending_unresolved_writes.pop(request_id, None)
-                state.engine._dedup.pop(request_id, None)
-                logger.info("Pending write %s (seq=%d) reconciled as UNCOMMITTED", request_id, seq)
+
+            # 2. Follower is behind: absence is NOT proof of failure; keep unresolved
+            if wal_last_seq < seq:
+                logger.info(
+                    "Follower wal_last_seq=%d < pending seq=%d; write %s remains unresolved",
+                    wal_last_seq,
+                    seq,
+                    request_id,
+                )
                 return WriteOutcome.OUTCOME_UNKNOWN
+
+            # 3. Follower wal_last_seq >= seq: follower has durably logged at or past seq.
+            # Since has_op is False or identity didn't match, authoritative log proves
+            # absence/divergence. Resolve as uncommitted.
+            logger.info(
+                "Authoritative reconciliation: follower wal_last_seq=%d >= seq=%d, "
+                "entry_found=%s (op_term=%s, op_request_id=%s); resolved as UNCOMMITTED",
+                wal_last_seq,
+                seq,
+                entry_found,
+                op_term,
+                op_request_id,
+            )
+            state.pending_unresolved_writes.pop(request_id, None)
+            state.engine._dedup.pop(request_id, None)
+            return WriteOutcome.OUTCOME_UNKNOWN
     except Exception as exc:
         logger.warning("Could not reconcile pending write %s with follower: %s", request_id, exc)
     finally:
@@ -1252,19 +1302,52 @@ def build_app(
     async def check_op(body: dict[str, Any], request: Request) -> dict[str, Any]:
         state = get_node(request)
         seq = body.get("seq")
+        term = body.get("term")
         request_id = body.get("request_id")
-        if request_id:
-            entry = state.engine.dedup_check(request_id)
-            if entry and entry.outcome == WriteOutcome.COMMITTED:
-                return {"status": "ok", "has_op": True, "seq": entry.seq}
+
+        wal_last_seq = state.wal.last_seq if state.wal else 0
+        last_applied_seq = state.engine.last_applied_seq
+
+        has_op = False
+        op_term = None
+        op_request_id = None
+        entry_found = False
+
+        # 1. Search WAL for entry at this seq
         if state.wal and seq is not None:
             for w in state.wal.replay(after_seq=max(0, seq - 1)):
                 if w.get("seq") == seq:
-                    if not request_id or w.get("request_id") == request_id:
-                        return {"status": "ok", "has_op": True, "seq": seq}
+                    entry_found = True
+                    op_term = w.get("term")
+                    op_request_id = w.get("request_id")
+                    if (term is None or op_term == term) and (
+                        not request_id or op_request_id == request_id
+                    ):
+                        has_op = True
+                    break
                 if w.get("seq", 0) > seq:
                     break
-        return {"status": "ok", "has_op": False}
+
+        # 2. Check dedup table if not matched in WAL
+        if not has_op and request_id:
+            dedup_entry = state.engine.dedup_check(request_id)
+            if dedup_entry and dedup_entry.outcome == WriteOutcome.COMMITTED:
+                if seq is None or dedup_entry.seq == seq:
+                    has_op = True
+                    entry_found = True
+                    if op_request_id is None:
+                        op_request_id = request_id
+
+        return {
+            "status": "ok",
+            "has_op": has_op,
+            "term": state.term,
+            "wal_last_seq": wal_last_seq,
+            "last_applied_seq": last_applied_seq,
+            "op_term": op_term,
+            "op_request_id": op_request_id,
+            "entry_found": entry_found,
+        }
 
     @app.get("/internal/snapshot", dependencies=[Depends(cluster_auth)])
     async def get_snapshot(request: Request) -> dict[str, Any]:
