@@ -613,19 +613,19 @@
 
 ## Module 16 — Final Release  👤 All
 
-- [ ] Fresh clone on a clean machine → `make setup && make test && make demo` works
-- [ ] All tests green; ruff, mypy, bandit, pip-audit clean
-- [ ] No secrets, `.env`, data files, or large artifacts in repo or history
-- [ ] README verified step by step
-- [ ] Proposal deliverables ticked:
-  - [ ] Source: shard nodes, router, coordinator, client
-  - [ ] Persistent shard map with epoch history + durable node storage
-  - [ ] Scripted demo (load → crash → migrate → fencing + stale reads)
-  - [ ] Test suite (CRUD, routing, merge, replication, fencing, migration)
-  - [ ] Final report with architecture, consistency analysis, evaluation
-  - [ ] Metrics: query latency, documents moved, recovery time, replication lag
-- [ ] Tag `git tag v1.0.0` and push; share the repo with instructors as required
-- [ ] 🔖 **COMMIT/TAG:** `release: v1.0.0`
+- [x] Fresh clone on a clean machine → `make setup && make test && make demo` works
+- [x] All tests green; ruff, mypy, bandit, pip-audit clean
+- [x] No secrets, `.env`, data files, or large artifacts in repo or history
+- [x] README verified step by step
+- [x] Proposal deliverables ticked:
+  - [x] Source: shard nodes, router, coordinator, client
+  - [x] Persistent shard map with epoch history + durable node storage
+  - [x] Scripted demo (load → crash → migrate → fencing + stale reads)
+  - [x] Test suite (CRUD, routing, merge, replication, fencing, migration)
+  - [x] Final report with architecture, consistency analysis, evaluation
+  - [x] Metrics: query latency, documents moved, recovery time, replication lag
+- [x] Tag `git tag v1.0.0` and push; share the repo with instructors as required
+- [x] 🔖 **COMMIT/TAG:** `release: v1.0.0`
 
 ---
 
