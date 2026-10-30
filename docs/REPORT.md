@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-**Sharded-Docstore** is an ACID-compliant, horizontally partitioned distributed document database engineered for strict data integrity, fault tolerance, and high availability. It achieves:
+**Sharded-Docstore** is a MongoDB-inspired, horizontally partitioned distributed document database engineered for strict per-document durability, synchronous primary–follower replication, deterministic lease-based failover, and live range migration. It achieves:
 1. **Zero-Loss Synchronous Replication:** Writes require local WAL fsync and remote follower fsync before client acknowledgment.
 2. **Deterministic Failover & Fencing:** Coordinator-enforced monotonic leases ($L$) and term numbers prevent split-brain anomalies under arbitrary network delays.
 3. **Strict Safety in Degraded Mode:** Following primary failure, the promoted node serves reads immediately but rejects single-node writes (`503 REPLICATION_UNAVAILABLE`) until a replica is resynced to `SYNCED`.
@@ -108,15 +108,29 @@ Evaluated across range sizes with concurrent read/write workloads:
 
 ### 3.5 Synchronously Replicated Throughput & Scalability
 
-Throughput and latency percentiles under 70/30 read/write traffic across the 3-shard cluster with synchronous replication enabled on all primary-follower pairs:
+Throughput and latency percentiles under 70/30 read/write traffic across the 3-shard cluster with synchronous replication enabled on all primary-follower pairs.
 
-| Concurrency Level | Throughput (ops/sec) | p50 Latency (ms) | p95 Latency (ms) | p99 Latency (ms) | Error Rate |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| **1 client** | 83.45 ops/s | 2.11 ms | 42.98 ms | 43.99 ms | 0.00% |
-| **5 clients** | 72.10 ops/s | 47.64 ms | 180.22 ms | 220.86 ms | 0.00% |
-| **10 clients** | 69.25 ops/s | 55.88 ms | 408.65 ms | 449.38 ms | 0.00% |
-| **25 clients** | 69.16 ops/s | 61.94 ms | 1115.61 ms | 1177.27 ms | 0.00% |
-| **50 clients** | 66.15 ops/s | 67.22 ms | 2329.62 ms | 2413.97 ms | 0.00% |
+#### Evaluation Artifacts
+- Summary JSON: `results/throughput_latency.json`
+- Summary CSV: `results/raw/throughput_latency.csv`
+- Raw Samples CSV: `results/raw/throughput_latency_samples.csv`
+- Environment Metadata: `results/environment.json`
+- Scalability Curve: `docs/figures/throughput_latency.png`
+
+#### Throughput Metric Clarification
+- **Successful Throughput:** $\text{len}(\text{successful\_latencies}) / \text{duration}$ (`successful_throughput_ops_sec`)
+- **Attempted Throughput:** $(\text{successful\_ops} + \text{failed\_ops}) / \text{duration}$ (`attempted_throughput_ops_sec`)
+- **Error Rate:** $\text{failed\_ops} / \text{total\_attempted\_ops}$
+
+With zero failed operations across all benchmark runs ($\text{error\_rate} = 0.00\%$, $\text{failed\_ops} = 0$), attempted throughput equals successful throughput.
+
+| Concurrency Level | Attempted Throughput | Successful Throughput | p50 Latency (ms) | p95 Latency (ms) | p99 Latency (ms) | Error Rate |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **1 client** | 80.39 ops/s | 80.39 ops/s | 2.69 ms | 43.80 ms | 45.48 ms | 0.00% |
+| **5 clients** | 69.53 ops/s | 69.53 ops/s | 48.63 ms | 182.80 ms | 225.48 ms | 0.00% |
+| **10 clients** | 68.43 ops/s | 68.43 ops/s | 59.70 ms | 410.17 ms | 452.15 ms | 0.00% |
+| **25 clients** | 66.09 ops/s | 66.09 ops/s | 65.68 ms | 1180.30 ms | 1249.90 ms | 0.00% |
+| **50 clients** | 62.72 ops/s | 62.72 ops/s | 70.84 ms | 2503.22 ms | 2635.22 ms | 0.00% |
 
 ![Throughput and Latency Scalability](figures/throughput_latency.png)
 
@@ -130,6 +144,10 @@ Throughput and latency percentiles under 70/30 read/write traffic across the 3-s
    The Coordinator is currently a single logical node. While durable state is persisted to disk, a failure of the coordinator pauses lease renewals and range migrations until restarted.
 3. **Monotonic Local Time Assumption:**  
    Leases rely on the monotonic passage of time (`time.monotonic()`) within each machine rather than wall-clock synchronization (NTP). This protects against leap seconds and NTP skew, but relies on predictable CPU scheduling.
+4. **Single-Document Atomicity (No Multi-Document Distributed Transactions):**  
+   Mutations provide strict atomic, durable operations at the single-document level (backed by per-shard WAL and synchronous follower replication). Multi-document distributed transactions across shards (e.g., 2PC) are deliberately out of scope.
+5. **Fail-Closed Durability vs. Standalone Opt-In:**  
+   In coordinated production clusters, writes strictly require follower quorum replication. Standalone single-node operation disables replication durability and requires explicit opt-in (`STANDALONE_MODE=true` / `--standalone`), intended strictly for local development and unit testing.
 
 ---
 

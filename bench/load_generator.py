@@ -35,9 +35,11 @@ class LoadConfig:
 class LoadResult:
     """Summary of benchmark run metrics."""
 
-    total_ops: int
+    total_ops: int  # Total attempted operations (successful + errors)
     duration_s: float
-    throughput_ops_sec: float
+    successful_throughput_ops_sec: float
+    attempted_throughput_ops_sec: float
+    throughput_ops_sec: float  # Preserved alias for successful_throughput_ops_sec
     read_ops: int
     write_ops: int
     error_ops: int
@@ -150,12 +152,17 @@ class LoadGenerator:
         )
 
         pcts = compute_percentiles(latencies)
-        throughput = round(len(latencies) / duration, 2) if duration > 0 else 0.0
+        total_attempted = len(latencies) + error_ops
+        successful_ops = len(latencies)
+        successful_throughput = round(successful_ops / duration, 2) if duration > 0 else 0.0
+        attempted_throughput = round(total_attempted / duration, 2) if duration > 0 else 0.0
 
         return LoadResult(
-            total_ops=len(latencies) + error_ops,
+            total_ops=total_attempted,
             duration_s=round(duration, 4),
-            throughput_ops_sec=throughput,
+            successful_throughput_ops_sec=successful_throughput,
+            attempted_throughput_ops_sec=attempted_throughput,
+            throughput_ops_sec=successful_throughput,
             read_ops=read_ops,
             write_ops=write_ops,
             error_ops=error_ops,

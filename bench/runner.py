@@ -199,7 +199,12 @@ async def run_throughput_latency_suite(
                         "concurrency": c,
                         "shards": 3,
                         "total_ops": res.total_ops,
+                        "successful_ops": len(res.latencies_ms),
+                        "failed_ops": res.error_ops,
+                        "timeout_ops": res.timeout_ops,
                         "duration_s": res.duration_s,
+                        "attempted_throughput_ops_sec": res.attempted_throughput_ops_sec,
+                        "successful_throughput_ops_sec": res.successful_throughput_ops_sec,
                         "throughput_ops_sec": res.throughput_ops_sec,
                         "latency_p50_ms": res.latency_p50_ms,
                         "latency_p90_ms": res.latency_p90_ms,
@@ -209,7 +214,8 @@ async def run_throughput_latency_suite(
                     }
                     results.append(entry)
                     print(
-                        f"Concurrency={c:2d} -> Throughput: {res.throughput_ops_sec:6.1f} ops/s, "
+                        f"Concurrency={c:2d} -> Successful: {res.successful_throughput_ops_sec:6.1f} ops/s, "
+                        f"Attempted: {res.attempted_throughput_ops_sec:6.1f} ops/s, "
                         f"p50: {res.latency_p50_ms:5.2f} ms, p95: {res.latency_p95_ms:5.2f} ms, "
                         f"p99: {res.latency_p99_ms:5.2f} ms, errors: {res.error_ops}"
                     )
@@ -225,6 +231,28 @@ async def run_throughput_latency_suite(
             json.dump(results, f, indent=2)
 
         with open(raw_dir / "throughput_latency.csv", "w", newline="") as f:
+            fieldnames = [
+                "concurrency",
+                "shards",
+                "total_ops",
+                "successful_ops",
+                "failed_ops",
+                "timeout_ops",
+                "duration_s",
+                "attempted_throughput_ops_sec",
+                "successful_throughput_ops_sec",
+                "throughput_ops_sec",
+                "latency_p50_ms",
+                "latency_p90_ms",
+                "latency_p95_ms",
+                "latency_p99_ms",
+                "error_rate",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
+
+        with open(raw_dir / "throughput_latency_samples.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["concurrency", "latency_ms"])
             writer.writeheader()
             writer.writerows(raw_rows)

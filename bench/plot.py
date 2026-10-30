@@ -40,7 +40,7 @@ def plot_throughput_latency(results_dir: Path, output_dir: Path) -> None:
         fontweight="bold",
     )
     ax1.set_xlabel("Client Concurrency", fontsize=10)
-    ax1.set_ylabel("Throughput (ops/sec)", fontsize=10)
+    ax1.set_ylabel("Successful Throughput (ops/sec)", fontsize=10)
     ax1.grid(True, linestyle="--", alpha=0.6)
     for x_val, y_val in zip(concurrency, throughput, strict=False):
         ax1.annotate(

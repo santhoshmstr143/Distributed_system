@@ -26,9 +26,6 @@ htmlcov/
 .coverage
 coverage.xml
 
-# Benchmark raw results (large; share via other means)
-results/raw/
-
 # macOS
 .DS_Store
 

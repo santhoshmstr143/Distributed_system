@@ -3,40 +3,40 @@
     "query_mode": "direct_key_primary",
     "shards_queried": 1,
     "samples": 300,
-    "latency_p50_ms": 1.521,
-    "latency_p90_ms": 1.897,
-    "latency_p95_ms": 1.989,
-    "latency_p99_ms": 2.362,
-    "latency_mean_ms": 1.604
+    "latency_p50_ms": 1.433,
+    "latency_p90_ms": 1.817,
+    "latency_p95_ms": 1.931,
+    "latency_p99_ms": 2.075,
+    "latency_mean_ms": 1.505
   },
   {
     "query_mode": "direct_key_follower",
     "shards_queried": 1,
     "samples": 300,
-    "latency_p50_ms": 1.58,
-    "latency_p90_ms": 1.905,
-    "latency_p95_ms": 1.976,
-    "latency_p99_ms": 2.077,
-    "latency_mean_ms": 1.635
+    "latency_p50_ms": 1.582,
+    "latency_p90_ms": 2.028,
+    "latency_p95_ms": 2.122,
+    "latency_p99_ms": 2.415,
+    "latency_mean_ms": 1.65
   },
   {
     "query_mode": "scatter_gather_1_shard",
     "shards_queried": 1,
     "samples": 300,
-    "latency_p50_ms": 6.043,
-    "latency_p90_ms": 6.497,
-    "latency_p95_ms": 6.831,
-    "latency_p99_ms": 8.48,
-    "latency_mean_ms": 6.305
+    "latency_p50_ms": 6.708,
+    "latency_p90_ms": 7.871,
+    "latency_p95_ms": 8.631,
+    "latency_p99_ms": 8.938,
+    "latency_mean_ms": 6.942
   },
   {
     "query_mode": "scatter_gather_3_shards",
     "shards_queried": 3,
     "samples": 300,
-    "latency_p50_ms": 6.093,
-    "latency_p90_ms": 7.253,
-    "latency_p95_ms": 8.287,
-    "latency_p99_ms": 9.402,
-    "latency_mean_ms": 6.415
+    "latency_p50_ms": 6.591,
+    "latency_p90_ms": 7.216,
+    "latency_p95_ms": 8.019,
+    "latency_p99_ms": 9.497,
+    "latency_mean_ms": 6.819
   }
 ]

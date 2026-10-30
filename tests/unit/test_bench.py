@@ -88,6 +88,9 @@ async def test_load_generator_error_rate_matches_failed_operations() -> None:
     assert res.error_ops == 2
     assert res.error_ops / res.total_ops == 0.2
     assert round(res.error_ops / max(1, res.total_ops), 4) == 0.2
+    assert res.successful_throughput_ops_sec > 0
+    assert res.attempted_throughput_ops_sec >= res.successful_throughput_ops_sec
+    assert round(res.successful_throughput_ops_sec / res.attempted_throughput_ops_sec, 2) == 0.80
 
 
 def test_compute_percentiles_accuracy() -> None:
